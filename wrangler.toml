@@ -1,7 +1,7 @@
 name = "nagasaribu-ai-workforce"
 main = "src/index.ts"
-compatibility_date = "2026-11-20"
+compatibility_date = "2026-05-03"
 workers_dev = true
 
 [vars]
-APP_ENV = "development"
+APP_ENV = "production"
