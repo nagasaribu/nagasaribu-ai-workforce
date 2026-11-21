@@ -75,3 +75,29 @@ No new migration was required for V3. It builds on the additive Phase 7 schema:
 - `conversation_messages`
 
 Existing production records are preserved.
+
+## Verification — 2026-11-21
+
+- `npm run typecheck` passed.
+- `npm test` passed **137 tests**.
+- Worker deployed from commit `d68873f`; final active version:
+  `0eb93899-fe29-4a57-87af-1039faac2e36`.
+- Production Web conversation verified with a temporary administrator session:
+  - `Hai SARA` → `conversation`, no task.
+  - `Semak status sistem kita` → `read_only_system_query`, actual D1/provider data,
+    no task.
+  - Follow-up opinion used the previous status turn; no task.
+  - Task count remained unchanged at 10 before and after.
+  - Temporary user and conversation were removed.
+- Production Telegram verification used a temporary token-gated signed webhook
+  injection (synthetic inbound, not a real Telegram delivery):
+  - greeting answered conversationally with prior conversation memory;
+  - status query returned actual D1/DeepSeek/Muse/Exa/Telegram data;
+  - follow-up used the previous status context;
+  - no tasks were created (10 before and after);
+  - replies were delivered to the paired Telegram chat.
+- The temporary verification endpoint returns `404` on production and on the
+  preview alias; the temporary token was removed.
+- `/health` reports D1, auth, DeepSeek primary, Muse backup, Exa and Telegram healthy.
+- No new migration, provider routing change, Supabase, paid plan or additional
+  repository was introduced.
