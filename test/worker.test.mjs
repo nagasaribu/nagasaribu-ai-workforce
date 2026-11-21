@@ -527,10 +527,12 @@ test("task execution runs in mock mode and records events and audit logs", async
       description: "Sediakan analisis kos awal untuk projek contoh.",
       capability: "penyelidikan",
       assignedAgentId: agentId,
+      maxTokens: 100,
     },
   });
   assert.equal(created.status, 201);
   const executionTaskId = created.data.task.id;
+  assert.match(created.data.task.metadata, /"maxTokens":100/);
 
   const executed = await call(`/api/tasks/${executionTaskId}/execute`, {
     method: "POST",

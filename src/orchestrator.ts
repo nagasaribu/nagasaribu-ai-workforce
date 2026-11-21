@@ -129,8 +129,10 @@ export async function executeAgent(
   toolOutput?: unknown,
 ): Promise<ProviderResult> {
   const config = parseAgentConfig(agent);
+  const metadata = parseJsonObject(task.metadata);
   const model = typeof config.model === "string" ? config.model : undefined;
-  const maxTokens = typeof config.maxTokens === "number" ? config.maxTokens : undefined;
+  const taskMaxTokens = typeof metadata.maxTokens === "number" ? metadata.maxTokens : undefined;
+  const agentMaxTokens = typeof config.maxTokens === "number" ? config.maxTokens : undefined;
   const built = buildAgentPrompt(agent, task, toolOutput);
 
   return runDeepSeek(
@@ -138,7 +140,7 @@ export async function executeAgent(
     {
       systemPrompt: built.systemPrompt,
       prompt: built.prompt,
-      maxTokens,
+      maxTokens: taskMaxTokens ?? agentMaxTokens,
     },
   );
 }

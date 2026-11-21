@@ -46,7 +46,7 @@ test("live execution sends a secure request and parses the response", async () =
       DEEPSEEK_BASE_URL: "https://api.deepseek.test",
       DEEPSEEK_MODEL: "deepseek-chat",
     },
-    INPUT,
+    { ...INPUT, maxTokens: 100 },
     async (url, init) => {
       captured = { url, init };
       return new Response(
@@ -69,6 +69,7 @@ test("live execution sends a secure request and parses the response", async () =
   assert.equal(captured.init.headers.authorization, "Bearer secret-key-value");
   const body = JSON.parse(captured.init.body);
   assert.equal(body.model, "deepseek-chat");
+  assert.equal(body.max_tokens, 100);
   assert.equal(body.stream, false);
   assert.equal(body.messages[0].role, "system");
   assert.equal(body.messages[1].content, INPUT.prompt);

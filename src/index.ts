@@ -158,6 +158,16 @@ function oneOf<T extends string>(value: string | undefined, allowed: T[], key: s
   return value as T;
 }
 
+function optionalInt(body: Body, key: string, min: number, max: number): number | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new HttpError(400, `Medan ${key} mesti integer antara ${min} dan ${max}.`);
+  }
+  return parsed;
+}
+
 function boolInt(body: Body, key: string): number | undefined {
   const value = body[key];
   if (value === undefined) return undefined;
@@ -1083,10 +1093,12 @@ async function handleTasks(
       const capability = str(body, "capability", 80);
       const requiresApproval = boolInt(body, "requiresApproval");
       const toolName = str(body, "tool", 60);
+      const maxTokens = optionalInt(body, "maxTokens", 64, 4096);
 
       const metadata: Record<string, unknown> = {};
       if (capability) metadata.capability = capability;
       if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
+      if (maxTokens !== undefined) metadata.maxTokens = maxTokens;
       if (toolName) {
         if (!isToolName(toolName)) throw new HttpError(400, "Alat yang dipilih tidak sah.");
         metadata.tool = toolName;
@@ -1186,6 +1198,7 @@ async function handleTasks(
     const capability = str(body, "capability", 80);
     const requiresApproval = boolInt(body, "requiresApproval");
     const toolName = str(body, "tool", 60);
+    const maxTokens = optionalInt(body, "maxTokens", 64, 4096);
     const currentState = stateOfTask(task);
 
     const updates: string[] = [];
@@ -1202,13 +1215,19 @@ async function handleTasks(
     if (assignedAgentId !== undefined) push("assigned_agent_id", assignedAgentId || null);
     if (assignedUserId !== undefined) push("assigned_user_id", assignedUserId || null);
 
-    if (capability !== undefined || requiresApproval !== undefined || toolName !== undefined) {
+    if (
+      capability !== undefined ||
+      requiresApproval !== undefined ||
+      toolName !== undefined ||
+      maxTokens !== undefined
+    ) {
       const metadata = parseJsonObject(task.metadata);
       if (capability !== undefined) {
         if (capability) metadata.capability = capability;
         else delete metadata.capability;
       }
       if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
+      if (maxTokens !== undefined) metadata.maxTokens = maxTokens;
       if (toolName !== undefined) {
         if (toolName) {
           if (!isToolName(toolName)) throw new HttpError(400, "Alat yang dipilih tidak sah.");
