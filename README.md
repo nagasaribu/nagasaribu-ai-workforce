@@ -1,12 +1,23 @@
 # NAGASARIBU AI WORKFORCE
 
-Cloud-first foundation for the NAGASARIBU AI Workforce.
+Cloud-first operations platform for the NAGASARIBU AI Workforce.
 
-## Phase 1
+## Phase 1 — Foundation
 - Cloudflare Worker API foundation
 - Health endpoint
 - Safe-by-default architecture
-- Future integrations: Supabase, Telegram, and DeepSeek (optional)
+
+## Phase 2 — Operations Control Centre
+- Dedicated Cloudflare D1 database (`nagasaribu-ai-workforce-db`)
+- Versioned SQL migrations
+- Users and roles, agent registry, tasks and task events, leads and lead sources,
+  approvals, and audit logs
+- Authenticated API for tasks, agents, prospective customers and approval workflows
+- Malay, responsive Operations Control Centre at `/`
+- Free-tier only: no paid services or plan upgrades
+
+See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema, API, security model and
+deployment details.
 
 ## Initial modules
 - SARA — orchestration and operations
@@ -14,24 +25,38 @@ Cloud-first foundation for the NAGASARIBU AI Workforce.
 - Marketing AI — campaigns and lead generation
 - Finance AI — budgeting and financial analysis
 - Technical AI — engineering and system support
-- Creative Studio — image, poster, and video workflows
+- Creative Studio — image, poster, and video workflow
 
 ## Development principles
 - Keep BINARUMAH, BARANGVIRAL, and JUTAONE deployments isolated.
 - Never change existing DNS, Pages projects, or production databases as part of this Worker setup.
-- Store API keys as Cloudflare secrets; never commit secrets.
+- Store API keys and secrets as Cloudflare secrets; never commit secrets.
 - Require explicit approval for payments, publishing, account changes, destructive actions, and external commitments.
 - RM0-first means using free tiers where available; it does not mean unlimited free model or video generation.
+- Do not create fake leads or send marketing messages.
 
 ## Local development
 ```bash
-npm install
+npm ci
+npm run typecheck
+npm test
+npm run db:migrate:local
+cp .dev.vars.example .dev.vars
+# edit .dev.vars and set a random SESSION_SECRET
 npm run dev
 ```
 
+Open the local URL and complete the one-time administrator setup.
+
 ## Deploy
 ```bash
+npm run db:migrate:remote
 npm run deploy
 ```
 
-Test `/health` after deployment.
+Set or rotate the session secret with:
+```bash
+printf '%s' 'a-long-random-secret' | npx wrangler secret put SESSION_SECRET
+```
+
+Verify `/health`, then open `/` to sign in.

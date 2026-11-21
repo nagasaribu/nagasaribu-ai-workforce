@@ -3,5 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2026-05-03"
 workers_dev = true
 
+[[d1_databases]]
+binding = "DB"
+database_name = "nagasaribu-ai-workforce-db"
+database_id = "20071e74-ddcd-4a1e-98ae-3524d9b1d079"
+migrations_dir = "migrations"
+
 [vars]
 APP_ENV = "production"

@@ -1,0 +1,4 @@
+# Copy this file to .dev.vars for local development.
+# Generate a secret with:
+#   node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64url'))"
+SESSION_SECRET=replace-with-a-long-random-secret
