@@ -167,7 +167,29 @@ administrator pairing, one-time code enforcement, duplicate updates, `/status`,
 - The temporary bootstrap secret was removed and `/telegram/register` now returns `404`.
 - Production tables exist and are empty: 0 accounts, 0 pairing codes, 0 updates.
 
-Live Telegram connectivity is **not yet claimed**. No real Telegram message has been
-received and answered yet. The next step is for the administrator to generate a pairing
-code in the dashboard, send `/pair CODE` to `@Ai_nagasaribu_bot`, and then send
-`/status` to complete live verification.
+Live Telegram connectivity is now verified in production:
+
+- Administrator paired at `2026-11-21T15:48:34Z`.
+- `/status` update `105047580` was received and answered.
+- Natural-language update `105047581` was received, answered, and recorded as task
+  `b317edb0-77b3-4097-a713-be3631855c7c`.
+- Webhook `getWebhookInfo` returned `matchesExpected: true`.
+
+### False-positive approval correction — 2026-11-21
+
+- Replaced raw substring matching with word-boundary, action-phrase and clause-aware
+  detection.
+- Added regression coverage for customer/marketing analysis language, explicit negative
+  instructions and genuine external actions.
+- Inspected production task `b317edb0-77b3-4097-a713-be3631855c7c`:
+  - `execution_count = 0`
+  - no result, no `last_execution_at`, no execution or tool events
+  - no approval records
+  - therefore it was never executed externally.
+- Removed the erroneous `requiresApproval` flag with a guarded update (only while the
+  task remained unexecuted), leaving the task in `pending` state and executable.
+- Recorded `approval_requirement_removed` in the task timeline and
+  `task.approval_requirement_removed` in the audit log.
+- `npm run typecheck` and `npm test` pass (104 tests).
+- Live production verification after deployment still requires the administrator to send
+  a new analysis-only Telegram message.
