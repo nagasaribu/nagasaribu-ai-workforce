@@ -98,3 +98,25 @@ The test suite covers:
 - Telegram formatting, `/task`, `/mode` and `/report full`,
 - HTML escaping and safe message splitting,
 - existing login, CRM, D1 and provider tests.
+
+## Deployment verification — 2026-11-21
+
+- Migrations `0008` and `0009` applied to production D1.
+- Existing data preserved: 1 user, 1 Telegram account, 7 tasks before migration;
+  preferences backfilled to `human`.
+- Worker deployed from commit `7a7f351`; active version after bootstrap-secret
+  removal: `9ca613f8-db23-4add-bdc5-6f8d7c354e98`.
+- Production web chat verified with a temporary administrator session:
+  - authenticated `GET /api/chat` returned human mode, 6 starter actions and the
+    requested welcome text;
+  - `POST /api/chat/mode` persisted `simple`;
+  - `POST /api/chat` with `/human` persisted a conversation and both messages;
+  - `GET /api/chat/history` returned the conversation.
+- The temporary verification user and conversation were deleted; counts remain
+  1 user, 1 preference, 0 conversations, 0 messages and 7 tasks.
+- Telegram webhook registration and command-menu registration succeeded
+  (`commandsRegistered: true`); the temporary bootstrap secret was removed.
+- No new real Telegram message arrived after the deployment. Telegram V2 live
+  message/reply verification therefore remains pending the next real message.
+- `/health` reports D1, auth, DeepSeek, Muse backup, Exa search and Telegram healthy.
+- `npm run typecheck` passed; `npm test` passed **127 tests**.
