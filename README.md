@@ -26,8 +26,18 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Permanent first-admin bootstrap lock and hardened RBAC
 - Real AI activity, mock mode and error visibility in the Malay dashboard
 
-See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API, and
-[`docs/PHASE-3.md`](docs/PHASE-3.md) for activation, orchestration and the live-AI blocker.
+## Phase 4 — Customer Acquisition Engine
+- Exa public-web search adapter with no-fake-results behaviour when unconfigured
+- Explainable prospect qualification with evidence, retrieval dates and missing information
+- Administrator review before CRM import with company/source deduplication
+- Marketing AI outreach drafts through DeepSeek Live; no automatic sending
+- Malay **Cari Prospek** interface with source links and approval controls
+- Search/draft rate limits, result limits and audit logging
+
+See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
+[`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration, and
+[`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine and the
+`EXA_API_KEY` requirement.
 
 ## Initial modules
 - SARA — orchestration and operations

@@ -10,7 +10,9 @@ import {
 } from "./auth.ts";
 import { consoleHtml } from "./ui.ts";
 import type { AuthUser, Env } from "./types.ts";
-import { getProviderStatus, ProviderError } from "./providers/deepseek.ts";
+import { getProviderStatus, ProviderError, runDeepSeek } from "./providers/deepseek.ts";
+import { getSearchStatus, searchExa, SearchError } from "./providers/exa.ts";
+import { buildProspectQuery, dedupeKey, prospectsFromSearch } from "./research.ts";
 import {
   executeAgent,
   parseAgentConfig,
@@ -43,6 +45,8 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "agents.write",
     "leads.read",
     "leads.write",
+    "prospects.read",
+    "prospects.write",
     "approvals.read",
     "approvals.write",
     "users.read",
@@ -305,6 +309,26 @@ function clearRateLimit(key: string): void {
   loginAttempts.delete(key);
 }
 
+const searchAttempts = new Map<string, { count: number; resetAt: number }>();
+const draftAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function consumeRateLimit(
+  store: Map<string, { count: number; resetAt: number }>,
+  key: string,
+  max: number,
+  windowMs: number,
+  message: string,
+): void {
+  const now = Date.now();
+  const entry = store.get(key);
+  if (!entry || entry.resetAt <= now) {
+    store.set(key, { count: 1, resetAt: now + windowMs });
+    return;
+  }
+  entry.count += 1;
+  if (entry.count > max) throw new HttpError(429, message, "rate_limited");
+}
+
 function can(user: AuthUser, permission: string): boolean {
   const permissions = ROLE_PERMISSIONS[user.role] ?? [];
   return permissions.includes("*") || permissions.includes(permission);
@@ -399,6 +423,9 @@ const TASK_SELECT = `
 const LEAD_SELECT = `
   SELECT l.id, l.company_name, l.contact_name, l.email, l.phone, l.source_id,
          l.status, l.owner_user_id, l.notes, l.consent_status, l.do_not_contact,
+         l.website, l.source_url, l.evidence, l.retrieved_at, l.qualification_score,
+         l.qualification_notes, l.missing_info, l.verified, l.follow_up_at,
+         l.marketing_draft, l.dedupe_key,
          l.created_at, l.updated_at, s.name AS source_name, u.name AS owner_name
   FROM leads l
   LEFT JOIN lead_sources s ON s.id = l.source_id
@@ -1712,6 +1739,9 @@ async function handleLeads(
         oneOf(str(body, "consentStatus"), ["unknown", "granted", "declined"], "consentStatus") ?? "unknown";
       const doNotContact = boolInt(body, "doNotContact") ?? 0;
       let ownerUserId = str(body, "ownerUserId", 64) || null;
+      const website = str(body, "website", 300) ?? "";
+      const followUpRaw = str(body, "followUpAt", 40);
+      const followUpAt = followUpRaw ? isoDate(followUpRaw, "followUpAt") : null;
 
       if (sourceId) {
         const source = await env.DB.prepare("SELECT id FROM lead_sources WHERE id = ?")
@@ -1729,10 +1759,24 @@ async function handleLeads(
         ownerUserId = user.id;
       }
 
+      const key = dedupeKey(companyName, website);
+      if (key) {
+        const duplicate = await env.DB.prepare(
+          `SELECT id FROM leads
+           WHERE dedupe_key = ? OR lower(company_name) = lower(?) OR (website <> '' AND lower(website) = lower(?))
+           LIMIT 1`,
+        )
+          .bind(key, companyName, website)
+          .first<{ id: string }>();
+        if (duplicate) {
+          throw new HttpError(409, "Syarikat ini sudah wujud dalam CRM.", "duplicate_lead");
+        }
+      }
+
       const id = newId();
       await env.DB.prepare(
-        `INSERT INTO leads (id, company_name, contact_name, email, phone, source_id, status, owner_user_id, notes, consent_status, do_not_contact)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO leads (id, company_name, contact_name, email, phone, source_id, status, owner_user_id, notes, consent_status, do_not_contact, website, follow_up_at, dedupe_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .bind(
           id,
@@ -1746,6 +1790,9 @@ async function handleLeads(
           notes,
           consentStatus,
           doNotContact,
+          website,
+          followUpAt,
+          key,
         )
         .run();
       await audit(env, request, user.id, "lead.create", "lead", id, { status, sourceId });
@@ -1795,6 +1842,9 @@ async function handleLeads(
     );
     const doNotContact = boolInt(body, "doNotContact");
     const ownerUserId = optionalText(body, "ownerUserId", 64);
+    const website = optionalText(body, "website", 300);
+    const followUpRaw = optionalText(body, "followUpAt", 40);
+    const followUpAt = followUpRaw === undefined ? undefined : followUpRaw ? isoDate(followUpRaw, "followUpAt") : null;
 
     if (companyName !== undefined) push("company_name", companyName);
     if (contactName !== undefined) push("contact_name", contactName);
@@ -1811,6 +1861,24 @@ async function handleLeads(
     if (notes !== undefined) push("notes", notes);
     if (consentStatus !== undefined) push("consent_status", consentStatus);
     if (doNotContact !== undefined) push("do_not_contact", doNotContact);
+    if (website !== undefined) push("website", website);
+    if (followUpAt !== undefined) push("follow_up_at", followUpAt);
+    if (companyName !== undefined || website !== undefined) {
+      const nextCompany = companyName ?? String(lead.company_name ?? "");
+      const nextWebsite = website ?? String(lead.website ?? "");
+      const key = dedupeKey(nextCompany, nextWebsite);
+      const duplicate = await env.DB.prepare(
+        `SELECT id FROM leads
+         WHERE id <> ? AND (dedupe_key = ? OR lower(company_name) = lower(?) OR (website <> '' AND lower(website) = lower(?)))
+         LIMIT 1`,
+      )
+        .bind(id, key, nextCompany, nextWebsite)
+        .first<{ id: string }>();
+      if (duplicate) {
+        throw new HttpError(409, "Syarikat ini sudah wujud dalam CRM.", "duplicate_lead");
+      }
+      push("dedupe_key", key);
+    }
     if (ownerUserId !== undefined) {
       if (user.role === "agent" && ownerUserId !== user.id) {
         throw new HttpError(403, "Ejen hanya boleh menetapkan dirinya sebagai pemilik.", "forbidden");
@@ -1868,6 +1936,526 @@ async function handleLeadSources(request: Request, env: Env, user: AuthUser): Pr
     );
   }
   throw new HttpError(405, "Kaedah tidak dibenarkan.", "method_not_allowed");
+}
+
+const PROSPECT_STATUSES = ["new", "imported", "rejected"];
+
+function jsonArray(value: unknown): unknown[] {
+  if (typeof value !== "string" || !value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function candidatePayload(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...row,
+    evidence: jsonArray(row.evidence),
+    missingInfo: jsonArray(row.missing_info),
+    verified: Boolean(row.verified),
+  };
+}
+
+function parseDraft(content: string): {
+  analysis: string;
+  whatsapp: string;
+  emailSubject: string;
+  emailBody: string;
+  proposal: string;
+} | null {
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1)) as Record<string, unknown>;
+    const stringValue = (key: string, max: number): string =>
+      typeof parsed[key] === "string" ? (parsed[key] as string).trim().slice(0, max) : "";
+    const draft = {
+      analysis: stringValue("analysis", 3000),
+      whatsapp: stringValue("whatsapp", 3000),
+      emailSubject: stringValue("emailSubject", 300),
+      emailBody: stringValue("emailBody", 6000),
+      proposal: stringValue("proposal", 6000),
+    };
+    if (!draft.whatsapp && !draft.emailBody && !draft.proposal) return null;
+    return draft;
+  } catch {
+    return null;
+  }
+}
+
+async function recordProspectSearch(
+  env: Env,
+  input: {
+    id: string;
+    userId: string;
+    service: string;
+    location: string;
+    customerType: string;
+    query: string;
+    resultCount: number;
+    status: "ok" | "unavailable" | "error";
+    error?: string;
+  },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO prospect_searches (id, user_id, service, location, customer_type, provider, query, result_count, status, error)
+     VALUES (?, ?, ?, ?, ?, 'exa', ?, ?, ?, ?)`,
+  )
+    .bind(
+      input.id,
+      input.userId,
+      input.service,
+      input.location,
+      input.customerType,
+      input.query,
+      input.resultCount,
+      input.status,
+      input.error ?? "",
+    )
+    .run();
+}
+
+async function handleProspects(
+  request: Request,
+  env: Env,
+  user: AuthUser,
+  segments: string[],
+  url: URL,
+): Promise<Response> {
+  requirePermission(user, "prospects.read");
+  const method = request.method;
+  const id = segments[2];
+  const action = segments[3];
+
+  if (id === "status" && method === "GET") {
+    const search = getSearchStatus(env);
+    const ai = getProviderStatus(env);
+    return json({
+      search: {
+        provider: search.provider,
+        configured: search.configured,
+        available: search.available,
+        reason: search.reason ?? null,
+        maxResults: 10,
+      },
+      ai: {
+        mode: ai.mode,
+        configured: ai.configured,
+        model: ai.model,
+        liveDrafts: ai.mode === "live",
+      },
+      limits: { searchPerWindow: 6, draftPerWindow: 10, windowMinutes: 10 },
+    });
+  }
+
+  if (id === "research" && method === "POST") {
+    requirePermission(user, "prospects.write");
+    consumeRateLimit(
+      searchAttempts,
+      user.id,
+      6,
+      10 * 60 * 1000,
+      "Had carian prospek dicapai. Sila cuba sebentar lagi.",
+    );
+
+    const body = await readJson(request);
+    const service = requiredStr(body, "service", 120);
+    const location = requiredStr(body, "location", 120);
+    const customerType = requiredStr(body, "customerType", 120);
+    const limit = optionalInt(body, "limit", 1, 10) ?? 5;
+    const query = buildProspectQuery({ service, location, customerType });
+    const searchId = newId();
+
+    try {
+      const response = await searchExa(env, { query, numResults: limit });
+      const retrievedAt = nowIso();
+      const prospects = prospectsFromSearch(
+        response.results,
+        { service, location, customerType },
+        retrievedAt,
+      );
+
+      await recordProspectSearch(env, {
+        id: searchId,
+        userId: user.id,
+        service,
+        location,
+        customerType,
+        query,
+        resultCount: prospects.length,
+        status: "ok",
+      });
+
+      for (const prospect of prospects) {
+        await env.DB.prepare(
+          `INSERT INTO prospect_candidates
+             (id, search_id, company_name, website, source_url, summary, contact_name, email, phone,
+              evidence, retrieved_at, qualification_score, qualification_notes, missing_info, verified, dedupe_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            newId(),
+            searchId,
+            prospect.companyName,
+            prospect.website,
+            prospect.sourceUrl,
+            prospect.summary,
+            prospect.contactName,
+            prospect.email,
+            prospect.phone,
+            JSON.stringify(prospect.evidence),
+            prospect.retrievedAt,
+            prospect.qualificationScore,
+            prospect.qualificationNotes,
+            JSON.stringify(prospect.missingInfo),
+            prospect.verified ? 1 : 0,
+            prospect.dedupeKey,
+          )
+          .run();
+      }
+
+      await audit(env, request, user.id, "prospect.search", "prospect_search", searchId, {
+        provider: "exa",
+        resultCount: prospects.length,
+        limit,
+      });
+
+      const candidates = await env.DB.prepare(
+        `SELECT c.*, s.service, s.location, s.customer_type, s.query
+         FROM prospect_candidates c JOIN prospect_searches s ON s.id = c.search_id
+         WHERE c.search_id = ? ORDER BY c.qualification_score DESC`,
+      )
+        .bind(searchId)
+        .all<Record<string, unknown>>();
+
+      return json(
+        {
+          search: {
+            id: searchId,
+            provider: "exa",
+            query,
+            status: "ok",
+            resultCount: prospects.length,
+            retrievedAt,
+            requestId: response.requestId ?? null,
+          },
+          candidates: candidates.results.map(candidatePayload),
+        },
+        201,
+      );
+    } catch (error) {
+      if (error instanceof SearchError) {
+        const status = error.code === "search_unavailable" ? "unavailable" : "error";
+        await recordProspectSearch(env, {
+          id: searchId,
+          userId: user.id,
+          service,
+          location,
+          customerType,
+          query,
+          resultCount: 0,
+          status,
+          error: error.message,
+        });
+        await audit(env, request, user.id, "prospect.search", "prospect_search", searchId, {
+          provider: "exa",
+          status,
+          code: error.code,
+        });
+        return json(
+          {
+            error: { code: error.code, message: error.message },
+            search: { id: searchId, status, resultCount: 0 },
+          },
+          error.status,
+        );
+      }
+
+      const message = "Carian prospek gagal.";
+      await recordProspectSearch(env, {
+        id: searchId,
+        userId: user.id,
+        service,
+        location,
+        customerType,
+        query,
+        resultCount: 0,
+        status: "error",
+        error: message,
+      });
+      await audit(env, request, user.id, "prospect.search", "prospect_search", searchId, {
+        status: "error",
+      });
+      return json({ error: { code: "search_failed", message } }, 500);
+    }
+  }
+
+  if (!id && method === "GET") {
+    const status = url.searchParams.get("status") ?? "new";
+    if (!PROSPECT_STATUSES.includes(status)) {
+      throw new HttpError(400, "Status prospek tidak sah.");
+    }
+    const result = await env.DB.prepare(
+      `SELECT c.*, s.service, s.location, s.customer_type, s.query
+       FROM prospect_candidates c JOIN prospect_searches s ON s.id = c.search_id
+       WHERE c.status = ? ORDER BY c.created_at DESC LIMIT 50`,
+    )
+      .bind(status)
+      .all<Record<string, unknown>>();
+    return json({ candidates: result.results.map(candidatePayload) });
+  }
+
+  if (!id) throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
+
+  const candidate = await env.DB.prepare(
+    `SELECT c.*, s.service, s.location, s.customer_type, s.query
+     FROM prospect_candidates c JOIN prospect_searches s ON s.id = c.search_id
+     WHERE c.id = ?`,
+  )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!candidate) throw new HttpError(404, "Prospek tidak dijumpai.", "not_found");
+
+  if (!action && method === "GET") {
+    return json({ candidate: candidatePayload(candidate) });
+  }
+
+  if (action === "import" && method === "POST") {
+    requirePermission(user, "prospects.write");
+    if (candidate.status !== "new") {
+      throw new HttpError(409, "Prospek ini telah diproses.", "already_processed");
+    }
+
+    const body = await readJson(request);
+    const followUpRaw = str(body, "followUpAt", 40);
+    const followUpAt = followUpRaw ? isoDate(followUpRaw, "followUpAt") : null;
+    const extraNotes = str(body, "notes", 2000) ?? "";
+
+    const duplicate = await env.DB.prepare(
+      `SELECT id, company_name FROM leads
+       WHERE dedupe_key = ? OR lower(company_name) = lower(?)
+          OR (website <> '' AND lower(website) = lower(?))
+          OR (source_url <> '' AND source_url = ?)
+       LIMIT 1`,
+    )
+      .bind(
+        candidate.dedupe_key,
+        candidate.company_name,
+        candidate.website ?? "",
+        candidate.source_url ?? "",
+      )
+      .first<{ id: string; company_name: string }>();
+
+    if (duplicate) {
+      return json(
+        {
+          error: {
+            code: "duplicate_lead",
+            message: `Syarikat ini sudah wujud dalam CRM: ${duplicate.company_name}.`,
+          },
+          existingLeadId: duplicate.id,
+        },
+        409,
+      );
+    }
+
+    const notes = [candidate.summary, candidate.qualification_notes, extraNotes]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .join("\n\n");
+    const marketingDraft =
+      candidate.draft_whatsapp || candidate.draft_email_body || candidate.draft_proposal
+        ? JSON.stringify({
+            whatsapp: candidate.draft_whatsapp,
+            emailSubject: candidate.draft_email_subject,
+            emailBody: candidate.draft_email_body,
+            proposal: candidate.draft_proposal,
+            analysis: candidate.draft_analysis,
+          })
+        : "";
+
+    const leadId = newId();
+    await env.DB.prepare(
+      `INSERT INTO leads
+         (id, company_name, contact_name, email, phone, source_id, status, owner_user_id, notes,
+          consent_status, do_not_contact, website, source_url, evidence, retrieved_at,
+          qualification_score, qualification_notes, missing_info, verified, follow_up_at,
+          marketing_draft, dedupe_key)
+       VALUES (?, ?, ?, ?, ?, 'source_exa', 'new', ?, ?, 'unknown', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        leadId,
+        candidate.company_name,
+        candidate.contact_name ?? "",
+        candidate.email ?? "",
+        candidate.phone ?? "",
+        user.id,
+        notes,
+        candidate.website ?? "",
+        candidate.source_url ?? "",
+        candidate.evidence ?? "[]",
+        candidate.retrieved_at ?? nowIso(),
+        candidate.qualification_score ?? 0,
+        candidate.qualification_notes ?? "",
+        candidate.missing_info ?? "[]",
+        candidate.verified ?? 0,
+        followUpAt,
+        marketingDraft,
+        candidate.dedupe_key ?? "",
+      )
+      .run();
+
+    await env.DB.prepare(
+      `UPDATE prospect_candidates SET status = 'imported', imported_lead_id = ? WHERE id = ?`,
+    )
+      .bind(leadId, id)
+      .run();
+    await audit(env, request, user.id, "prospect.import", "prospect_candidate", id, { leadId });
+    return json(
+      {
+        lead: await env.DB.prepare(`${LEAD_SELECT} WHERE l.id = ?`).bind(leadId).first(),
+      },
+      201,
+    );
+  }
+
+  if (action === "reject" && method === "POST") {
+    requirePermission(user, "prospects.write");
+    if (candidate.status !== "new") {
+      throw new HttpError(409, "Prospek ini telah diproses.", "already_processed");
+    }
+    await env.DB.prepare("UPDATE prospect_candidates SET status = 'rejected' WHERE id = ?")
+      .bind(id)
+      .run();
+    await audit(env, request, user.id, "prospect.reject", "prospect_candidate", id);
+    return json({ ok: true });
+  }
+
+  if (action === "draft" && method === "POST") {
+    requirePermission(user, "prospects.write");
+    const ai = getProviderStatus(env);
+    if (ai.mode !== "live") {
+      return json(
+        {
+          error: {
+            code: "ai_not_live",
+            message: "Draf outreach memerlukan DeepSeek Live. Konfigurasikan DEEPSEEK_API_KEY.",
+          },
+        },
+        503,
+      );
+    }
+    if (candidate.status !== "new") {
+      throw new HttpError(409, "Draf hanya boleh dijana untuk prospek baharu.", "already_processed");
+    }
+    consumeRateLimit(
+      draftAttempts,
+      user.id,
+      10,
+      10 * 60 * 1000,
+      "Had penjanaan draf dicapai. Sila cuba sebentar lagi.",
+    );
+
+    const marketingAgent = await env.DB.prepare(
+      `SELECT name, config FROM agent_registry
+       WHERE id = 'agent_marketing' OR kind = 'customer_acquisition'
+       ORDER BY CASE WHEN id = 'agent_marketing' THEN 0 ELSE 1 END LIMIT 1`,
+    ).first<{ name: string; config: string }>();
+    const agentConfig = marketingAgent ? parseJsonObject(marketingAgent.config) : {};
+    const systemPrompt =
+      typeof agentConfig.systemPrompt === "string"
+        ? agentConfig.systemPrompt
+        : "Anda ialah Marketing AI. Jana draf outreach perniagaan yang jujur dan tidak agresif dalam Bahasa Melayu.";
+
+    const evidence = jsonArray(candidate.evidence);
+    const missing = jsonArray(candidate.missing_info);
+    const prompt = [
+      `Syarikat prospek: ${String(candidate.company_name ?? "")}`,
+      `Laman web: ${String(candidate.website ?? "") || "tidak diketahui"}`,
+      `Sumber: ${String(candidate.source_url ?? "")}`,
+      `Ringkasan awam: ${String(candidate.summary ?? "")}`,
+      `Perkhidmatan yang ditawarkan: ${String(candidate.service ?? "")}`,
+      `Lokasi: ${String(candidate.location ?? "")}`,
+      `Jenis pelanggan: ${String(candidate.customer_type ?? "")}`,
+      `Skor kelayakan: ${String(candidate.qualification_score ?? 0)}/100`,
+      `Maklumat hilang: ${JSON.stringify(missing)}`,
+      `Bukti: ${JSON.stringify(evidence).slice(0, 4000)}`,
+      "",
+      "Jana draf outreach yang ringkas dan peribadi. Jangan cipta nama, e-mel, telefon, harga atau fakta.",
+      "Jika maklumat tiada, tulis [perlu disahkan].",
+      "Jangan nyatakan bahawa mesej telah dihantar. Ini hanya draf untuk semakan manusia.",
+      "",
+      'Balas HANYA dengan JSON sah: {"analysis":"...","whatsapp":"...","emailSubject":"...","emailBody":"...","proposal":"..."}',
+    ].join("\n");
+
+    try {
+      const result = await runDeepSeek(env, {
+        systemPrompt,
+        prompt,
+        maxTokens: 1200,
+        temperature: 0.3,
+      });
+      const draft = parseDraft(result.content);
+      if (!draft) {
+        await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
+          mode: result.mode,
+          model: result.model,
+          outcome: "invalid_format",
+        });
+        return json(
+          { error: { code: "draft_invalid", message: "DeepSeek memulangkan format draf tidak sah; tiada draf disimpan." } },
+          502,
+        );
+      }
+
+      const draftedAt = nowIso();
+      await env.DB.prepare(
+        `UPDATE prospect_candidates
+         SET draft_whatsapp = ?, draft_email_subject = ?, draft_email_body = ?,
+             draft_proposal = ?, draft_analysis = ?, draft_mode = 'live', drafted_at = ?
+         WHERE id = ?`,
+      )
+        .bind(
+          draft.whatsapp,
+          draft.emailSubject,
+          draft.emailBody,
+          draft.proposal,
+          draft.analysis,
+          draftedAt,
+          id,
+        )
+        .run();
+      await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
+        mode: result.mode,
+        model: result.model,
+        outcome: "completed",
+      });
+      return json({
+        draft,
+        provider: { mode: result.mode, model: result.model, live: result.mode === "live" },
+        draftedAt,
+      });
+    } catch (error) {
+      const providerError =
+        error instanceof ProviderError
+          ? error
+          : new ProviderError("provider_error", "Penjanaan draf gagal.", 502);
+      await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
+        mode: ai.mode,
+        outcome: "failed",
+        code: providerError.code,
+      });
+      return json(
+        { error: { code: providerError.code, message: providerError.message } },
+        providerError.status,
+      );
+    }
+  }
+
+  throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
 }
 
 async function handleApprovals(
@@ -2169,6 +2757,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (segments[1] === "tasks") return handleTasks(request, env, user, segments, url);
   if (segments[1] === "agents") return handleAgents(request, env, user, segments, url);
+  if (segments[1] === "prospects") return handleProspects(request, env, user, segments, url);
   if (segments[1] === "leads") return handleLeads(request, env, user, segments, url);
   if (segments[1] === "lead-sources") return handleLeadSources(request, env, user);
   if (segments[1] === "approvals") return handleApprovals(request, env, user, segments, url);
@@ -2199,6 +2788,7 @@ async function handleHealth(env: Env): Promise<Response> {
         database: dbOk ? "ok" : "error",
         auth: env.SESSION_SECRET ? "configured" : "missing",
         ai: getProviderStatus(env).mode,
+        search: getSearchStatus(env).available ? "configured" : "unavailable",
       },
     },
     dbOk ? 200 : 503,

@@ -8,3 +8,7 @@ SESSION_SECRET=replace-with-a-long-random-secret
 # DEEPSEEK_BASE_URL=https://api.deepseek.com
 # DEEPSEEK_MODEL=deepseek-chat
 # AI_MODE=mock
+
+# Optional public-web search (required for Cari Prospek).
+# EXA_API_KEY=your-exa-api-key
+# EXA_BASE_URL=https://api.exa.ai

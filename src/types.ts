@@ -22,8 +22,9 @@ export interface D1Database {
 }
 
 import type { AiBindings } from "./providers/deepseek.ts";
+import type { SearchBindings } from "./providers/exa.ts";
 
-export interface Env extends AiBindings {
+export interface Env extends AiBindings, SearchBindings {
   DB: D1Database;
   APP_ENV: string;
   SESSION_SECRET?: string;

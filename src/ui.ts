@@ -353,6 +353,8 @@ export const consoleHtml = String.raw`<!doctype html>
       <label>Nama hubungan<input name="contactName" type="text" maxlength="120"></label>
       <label>E-mel<input name="email" type="email" maxlength="254"></label>
       <label>Telefon<input name="phone" type="text" maxlength="40"></label>
+      <label>Laman web<input name="website" type="url" maxlength="300"></label>
+      <label>Tarikh susulan<input name="followUpAt" type="date"></label>
       <label>Sumber<select name="sourceId"></select></label>
       <label>Status<select name="status"></select></label>
       <label>Persetujuan<select name="consentStatus"></select></label>
@@ -364,6 +366,23 @@ export const consoleHtml = String.raw`<!doctype html>
       <button class="btn btn-primary" type="submit">Simpan</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="draft-dialog">
+  <div class="panel-body">
+    <h2>Draf Outreach</h2>
+    <p class="dialog-sub">Draf untuk semakan manusia. Tiada mesej dihantar atau kandungan diterbitkan.</p>
+    <div class="form-grid">
+      <label class="wide">Analisis<textarea id="draft-analysis" readonly></textarea></label>
+      <label class="wide">WhatsApp<textarea id="draft-whatsapp" readonly></textarea></label>
+      <label class="wide">Subjek e-mel<input id="draft-email-subject" type="text" readonly></label>
+      <label class="wide">E-mel<textarea id="draft-email-body" readonly></textarea></label>
+      <label class="wide">Cadangan<textarea id="draft-proposal" readonly></textarea></label>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="button" data-close="draft-dialog">Tutup</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="decision-dialog">
@@ -393,7 +412,8 @@ export const consoleHtml = String.raw`<!doctype html>
     leads: [],
     sources: [],
     approvals: [],
-    users: []
+    users: [],
+    prospects: []
   };
 
   var ROLE_LABELS = { admin: "Pentadbir", manager: "Pengurus", agent: "Ejen", viewer: "Pemerhati" };
@@ -447,6 +467,7 @@ export const consoleHtml = String.raw`<!doctype html>
     dashboard: "Ringkasan",
     tasks: "Tugas",
     agents: "Ejen",
+    prospects: "Cari Prospek",
     leads: "Prospek",
     approvals: "Kelulusan",
     users: "Pengguna",
@@ -567,6 +588,9 @@ export const consoleHtml = String.raw`<!doctype html>
 
   function buildNav() {
     var items = [["dashboard", "Ringkasan"], ["tasks", "Tugas"], ["agents", "Ejen"]];
+    if (state.user.role === "admin" || state.user.role === "manager") {
+      items.push(["prospects", "Cari Prospek"]);
+    }
     if (state.user.role === "manager" || state.user.role === "admin" || state.user.role === "agent") {
       items.push(["leads", "Prospek"]);
       items.push(["approvals", "Kelulusan"]);
@@ -753,6 +777,69 @@ export const consoleHtml = String.raw`<!doctype html>
     });
   };
 
+  loaders.prospects = function () {
+    return Promise.all([api("/api/prospects/status"), api("/api/prospects?status=new")]).then(function (results) {
+      var status = results[0];
+      var candidates = results[1].candidates || [];
+      state.prospects = candidates;
+
+      var warnings = "";
+      if (!status.search.available) {
+        warnings += '<div class="login-note">Carian web tidak tersedia. <strong>EXA_API_KEY</strong> belum dikonfigurasikan. Sistem tidak akan menjana hasil carian palsu.</div>';
+      }
+      if (!status.ai.liveDrafts) {
+        warnings += '<div class="login-note">Draf outreach memerlukan DeepSeek Live. Draf tidak akan dijana dalam mod mock.</div>';
+      }
+
+      var cards = candidates.length
+        ? candidates.map(function (candidate) {
+            var scoreTone = candidate.qualification_score >= 60 ? "green" : candidate.qualification_score >= 35 ? "amber" : "slate";
+            var missing = (candidate.missingInfo || []).map(function (item) {
+              return '<span class="chip">' + esc(item) + "</span>";
+            }).join("");
+            var evidence = (candidate.evidence || []).map(function (item) {
+              var link = item && item.url ? '<a href="' + esc(item.url) + '" target="_blank" rel="noopener noreferrer">' + esc(item.title || item.url) + "</a>" : "";
+              return '<div class="sub">' + link + (item && item.publishedDate ? " · " + esc(item.publishedDate) : "") + "</div>";
+            }).join("");
+            var contacts = [];
+            if (candidate.email) contacts.push('<span class="chip">' + esc(candidate.email) + "</span>");
+            if (candidate.phone) contacts.push('<span class="chip">' + esc(candidate.phone) + "</span>");
+            var website = candidate.website
+              ? '<a href="' + esc(candidate.website) + '" target="_blank" rel="noopener noreferrer">' + esc(candidate.website) + "</a>"
+              : '<span class="muted">Laman web tidak ditemui</span>';
+            var source = candidate.source_url
+              ? '<a href="' + esc(candidate.source_url) + '" target="_blank" rel="noopener noreferrer">Sumber awam</a>'
+              : "";
+            var hasDraft = Boolean(candidate.draft_whatsapp || candidate.draft_email_body || candidate.draft_proposal);
+            var draftButton = status.ai.liveDrafts
+              ? '<button class="btn btn-sm" type="button" data-action="prospect-draft" data-id="' + esc(candidate.id) + '">' + (hasDraft ? "Jana Semula Draf" : "Jana Draf") + "</button>"
+              : "";
+            var viewDraft = hasDraft
+              ? '<button class="btn btn-sm" type="button" data-action="prospect-view-draft" data-id="' + esc(candidate.id) + '">Lihat Draf</button>'
+              : "";
+            return '<div class="card"><h3>' + esc(candidate.company_name) + '</h3><div class="meta">' + website + " · " + (candidate.verified ? '<span class="badge green">Disahkan sumber</span>' : '<span class="badge amber">Belum disahkan</span>') + ' <span class="badge ' + scoreTone + '">Skor ' + esc(candidate.qualification_score) + "</span></div>" +
+              '<p class="small" style="margin:10px 0 0">' + esc(candidate.summary) + "</p>" +
+              '<div class="chips">' + (contacts.length ? contacts.join("") : '<span class="chip">Tiada hubungan awam ditemui</span>') + "</div>" +
+              (missing ? '<div class="sub" style="margin-top:10px">Maklumat hilang: ' + missing + "</div>" : "") +
+              '<div class="sub" style="margin-top:8px">' + esc(candidate.qualification_notes || "") + "</div>" +
+              '<div style="margin-top:8px">' + evidence + source + "</div>" +
+              '<div class="card-actions">' + draftButton + viewDraft + '<button class="btn btn-sm btn-primary" type="button" data-action="prospect-import" data-id="' + esc(candidate.id) + '">Import ke CRM</button><button class="btn btn-sm btn-danger" type="button" data-action="prospect-reject" data-id="' + esc(candidate.id) + '">Tolak</button></div></div>';
+          }).join("")
+        : '<div class="empty">Tiada prospek menunggu semakan.</div>';
+
+      $("view").innerHTML =
+        '<div class="page-head"><div><h2>Cari prospek perniagaan</h2><p>Hasil carian awam mesti disemak oleh pentadbir sebelum diimport ke CRM. Tiada hasil palsu dijana.</p></div></div>' +
+        warnings +
+        '<details class="panel" open><summary>Carian baharu</summary><div class="panel-body"><form id="prospect-search-form"><div class="form-grid">' +
+          '<label>Perkhidmatan<input name="service" type="text" maxlength="120" required placeholder="contoh: automasi AI untuk operasi"></label>' +
+          '<label>Lokasi<input name="location" type="text" maxlength="120" required placeholder="contoh: Kuala Lumpur"></label>' +
+          '<label>Kategori pelanggan<input name="customerType" type="text" maxlength="120" required placeholder="contoh: kontraktor binaan"></label>' +
+          '<label>Had hasil<select name="limit">' + optionList({ "3": "3 hasil", "5": "5 hasil", "10": "10 hasil" }, "5") + "</select></label>" +
+        '</div><div class="form-actions"><button class="btn btn-primary" type="submit"' + (status.search.available ? "" : " disabled") + ">Cari Prospek</button></div></form></div></details>" +
+        '<div class="panel"><div class="panel-head"><h2>Menunggu Semakan</h2><span class="muted small">' + candidates.length + ' prospek</span></div><div class="panel-body"><div class="card-grid">' + cards + "</div></div></div>";
+    });
+  };
+
   loaders.leads = function () {
     return Promise.all([api("/api/leads"), api("/api/lead-sources")]).then(function (results) {
       state.leads = results[0].leads;
@@ -849,6 +936,15 @@ export const consoleHtml = String.raw`<!doctype html>
     });
   };
 
+  function showDraft(draft) {
+    $("draft-analysis").value = draft.analysis || "";
+    $("draft-whatsapp").value = draft.whatsapp || "";
+    $("draft-email-subject").value = draft.emailSubject || draft.email_subject || "";
+    $("draft-email-body").value = draft.emailBody || draft.email_body || "";
+    $("draft-proposal").value = draft.proposal || "";
+    $("draft-dialog").showModal();
+  }
+
   function openTaskDialog(id) {
     var task = state.tasks.filter(function (item) { return item.id === id; })[0];
     if (!task) return;
@@ -880,6 +976,8 @@ export const consoleHtml = String.raw`<!doctype html>
     form.elements.contactName.value = lead.contact_name || "";
     form.elements.email.value = lead.email || "";
     form.elements.phone.value = lead.phone || "";
+    form.elements.website.value = lead.website || "";
+    form.elements.followUpAt.value = lead.follow_up_at ? String(lead.follow_up_at).slice(0, 10) : "";
     form.elements.sourceId.innerHTML = '<option value="">Tiada sumber</option>' + state.sources.map(function (source) {
       return '<option value="' + esc(source.id) + '"' + (source.id === lead.source_id ? " selected" : "") + ">" + esc(source.name) + "</option>";
     }).join("");
@@ -980,6 +1078,32 @@ export const consoleHtml = String.raw`<!doctype html>
       return;
     }
 
+    if (form.id === "prospect-search-form") {
+      event.preventDefault();
+      var prospectData = new FormData(form);
+      var searchButton = form.querySelector('button[type="submit"]');
+      if (searchButton) {
+        searchButton.disabled = true;
+        searchButton.textContent = "Mencari…";
+      }
+      api("/api/prospects/research", {
+        method: "POST",
+        body: {
+          service: prospectData.get("service"),
+          location: prospectData.get("location"),
+          customerType: prospectData.get("customerType"),
+          limit: Number(prospectData.get("limit") || 5)
+        }
+      }).then(function (data) {
+        toast((data.candidates ? data.candidates.length : 0) + " prospek ditemui. Sila semak sebelum import.");
+        switchTab("prospects");
+      }).catch(function (error) {
+        toast(error.message, true);
+        switchTab("prospects");
+      });
+      return;
+    }
+
     if (form.id === "agent-form") {
       event.preventDefault();
       var agentData = new FormData(form);
@@ -1009,6 +1133,8 @@ export const consoleHtml = String.raw`<!doctype html>
           contactName: leadData.get("contactName"),
           email: leadData.get("email"),
           phone: leadData.get("phone"),
+          website: leadData.get("website"),
+          followUpAt: leadData.get("followUpAt") || null,
           sourceId: leadData.get("sourceId") || null,
           status: leadData.get("status"),
           consentStatus: leadData.get("consentStatus"),
@@ -1032,6 +1158,8 @@ export const consoleHtml = String.raw`<!doctype html>
           contactName: leadEdit.get("contactName"),
           email: leadEdit.get("email"),
           phone: leadEdit.get("phone"),
+          website: leadEdit.get("website"),
+          followUpAt: leadEdit.get("followUpAt") || null,
           sourceId: leadEdit.get("sourceId") || null,
           status: leadEdit.get("status"),
           consentStatus: leadEdit.get("consentStatus"),
@@ -1158,6 +1286,64 @@ export const consoleHtml = String.raw`<!doctype html>
           toast(error.message, true);
           switchTab("tasks");
         });
+      return;
+    }
+
+    if (action === "prospect-view-draft") {
+      var draftCandidate = state.prospects.filter(function (item) { return item.id === target.getAttribute("data-id"); })[0];
+      if (!draftCandidate) return;
+      showDraft({
+        analysis: draftCandidate.draft_analysis,
+        whatsapp: draftCandidate.draft_whatsapp,
+        emailSubject: draftCandidate.draft_email_subject,
+        emailBody: draftCandidate.draft_email_body,
+        proposal: draftCandidate.draft_proposal
+      });
+      return;
+    }
+
+    if (action === "prospect-draft") {
+      target.disabled = true;
+      target.textContent = "Menjana…";
+      api("/api/prospects/" + encodeURIComponent(target.getAttribute("data-id")) + "/draft", {
+        method: "POST",
+        body: {}
+      }).then(function (data) {
+        showDraft(data.draft);
+        toast("Draf dijana untuk semakan. Tiada mesej dihantar.");
+        loaders.prospects();
+      }).catch(function (error) {
+        toast(error.message, true);
+        target.disabled = false;
+        target.textContent = "Jana Draf";
+      });
+      return;
+    }
+
+    if (action === "prospect-import") {
+      target.disabled = true;
+      api("/api/prospects/" + encodeURIComponent(target.getAttribute("data-id")) + "/import", {
+        method: "POST",
+        body: {}
+      }).then(function () {
+        toast("Prospek diimport ke CRM.");
+        switchTab("prospects");
+      }).catch(function (error) {
+        toast(error.message, true);
+        target.disabled = false;
+      });
+      return;
+    }
+
+    if (action === "prospect-reject") {
+      if (!window.confirm("Tolak prospek ini? Tiada mesej akan dihantar.")) return;
+      api("/api/prospects/" + encodeURIComponent(target.getAttribute("data-id")) + "/reject", {
+        method: "POST",
+        body: {}
+      }).then(function () {
+        toast("Prospek ditolak.");
+        switchTab("prospects");
+      }).catch(function (error) { toast(error.message, true); });
       return;
     }
 

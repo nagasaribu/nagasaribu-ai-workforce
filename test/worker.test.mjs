@@ -107,6 +107,7 @@ test("health reports an operational phase 2 service with a working database", as
   assert.equal(response.data.checks.database, "ok");
   assert.equal(response.data.checks.auth, "configured");
   assert.equal(response.data.checks.ai, "mock");
+  assert.equal(response.data.checks.search, "unavailable");
 });
 
 test("root serves the Malay Operations Control Centre with security headers", async () => {
@@ -133,6 +134,8 @@ test("administrative endpoints reject unauthenticated requests", async () => {
     "/api/dashboard",
     "/api/tasks",
     "/api/agents",
+    "/api/prospects",
+    "/api/prospects/status",
     "/api/leads",
     "/api/approvals",
     "/api/users",
