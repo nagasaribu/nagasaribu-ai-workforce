@@ -836,9 +836,10 @@ async function executeTask(
     throw new HttpError(400, "Alat yang dipilih tidak sah.", "invalid_tool");
   }
 
+  const analysisOnly = metadata.approvalMode === "analysis_only";
   const requiresApproval =
     metadata.requiresApproval === true ||
-    agentConfig.requiresApproval === true ||
+    (!analysisOnly && agentConfig.requiresApproval === true) ||
     parseCapabilities(agent).includes("external_action") ||
     tool?.risk === "approval_required";
 
@@ -1290,6 +1291,7 @@ async function runTelegramTask(
       telegram_user_id: input.telegramUserId,
       telegram_chat_id: input.chatId,
       requiresApproval: input.requiresApproval,
+      approvalMode: input.requiresApproval ? "external_action" : "analysis_only",
     };
     const assignedAgent = await resolveTelegramAgent(env, text);
     const initialState = assignedAgent ? "assigned" : "pending";
@@ -1323,12 +1325,14 @@ async function runTelegramTask(
       {
         source: "telegram",
         requiresApproval: input.requiresApproval,
+        approvalMode: metadata.approvalMode,
         assignedAgentId: assignedAgent?.id ?? null,
       },
     );
     await audit(env, request, user.id, "telegram.task.create", "task", taskId, {
       chatId: input.chatId,
       requiresApproval: input.requiresApproval,
+      approvalMode: metadata.approvalMode,
       assignedAgentId: assignedAgent?.id ?? null,
     });
 

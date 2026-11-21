@@ -219,6 +219,7 @@ test("administrator setup creates the dashboard account", async () => {
       kind: "customer_acquisition",
       description: "Ejen pemasaran untuk ujian Telegram.",
       capabilities: ["customer_acquisition", "campaign_planning", "market_research"],
+      config: { requiresApproval: true, model: "deepseek-chat" },
     },
   });
   assert.equal(marketing.status, 201);
@@ -429,7 +430,9 @@ test("the complete analysis-only Telegram instruction executes without an approv
   assert.ok(task);
   assert.equal(task.execution_count, 1, "analysis-only task should execute exactly once");
   assert.equal(task.assigned_agent_id, marketingAgentId, "Marketing AI must receive the task");
-  assert.notEqual(JSON.parse(task.metadata).requiresApproval, true);
+  const metadata = JSON.parse(task.metadata);
+  assert.notEqual(metadata.requiresApproval, true);
+  assert.equal(metadata.approvalMode, "analysis_only");
 
   const approvals = await dbFirst(
     "SELECT COUNT(*) AS count FROM approvals WHERE entity_id = ?",
@@ -445,6 +448,31 @@ test("the complete analysis-only Telegram instruction executes without an approv
   assert.ok(types.includes("execution_started"));
   assert.ok(types.includes("execution_mock"));
   assert.ok(!types.includes("approval_required"));
+});
+
+test("genuine external actions assigned to Marketing AI still require approval", async () => {
+  const text = "Tugaskan Marketing AI. Hantar WhatsApp kepada pelanggan.";
+  const response = await sendUpdate(messageUpdate(2008, text));
+  assert.equal(response.status, 200);
+  assert.match(lastSent().text, /PENGESAHAN DIPERLUKAN/);
+  assert.match(lastSent().text, /\/confirm/);
+
+  const task = await dbFirst(
+    "SELECT id, execution_count, assigned_agent_id, metadata FROM tasks WHERE description = ? ORDER BY created_at DESC LIMIT 1",
+    text,
+  );
+  assert.ok(task);
+  assert.equal(task.execution_count, 0, "external task must not execute before confirmation");
+  assert.equal(task.assigned_agent_id, marketingAgentId);
+  const metadata = JSON.parse(task.metadata);
+  assert.equal(metadata.requiresApproval, true);
+  assert.equal(metadata.approvalMode, "external_action");
+
+  const approvals = await dbFirst(
+    "SELECT COUNT(*) AS count FROM approvals WHERE entity_id = ?",
+    task.id,
+  );
+  assert.equal(approvals.count, 0);
 });
 
 test("admin Telegram status exposes connection state without secrets", async () => {
