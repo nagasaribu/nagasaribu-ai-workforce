@@ -13,6 +13,8 @@ import type { AuthUser, Env } from "./types.ts";
 import { getProviderStatus, ProviderError, runDeepSeek } from "./providers/deepseek.ts";
 import { getSearchStatus, searchExa, SearchError } from "./providers/exa.ts";
 import { buildProspectQuery, dedupeKey, prospectsFromSearch } from "./research.ts";
+import { analyseProspectsWithDeepSeek } from "./analysis.ts";
+import { tryConsume } from "./rate-limit.ts";
 import {
   executeAgent,
   parseAgentConfig,
@@ -319,14 +321,9 @@ function consumeRateLimit(
   windowMs: number,
   message: string,
 ): void {
-  const now = Date.now();
-  const entry = store.get(key);
-  if (!entry || entry.resetAt <= now) {
-    store.set(key, { count: 1, resetAt: now + windowMs });
-    return;
+  if (!tryConsume(store, key, max, windowMs)) {
+    throw new HttpError(429, message, "rate_limited");
   }
-  entry.count += 1;
-  if (entry.count > max) throw new HttpError(429, message, "rate_limited");
 }
 
 function can(user: AuthUser, permission: string): boolean {
@@ -425,7 +422,7 @@ const LEAD_SELECT = `
          l.status, l.owner_user_id, l.notes, l.consent_status, l.do_not_contact,
          l.website, l.source_url, l.evidence, l.retrieved_at, l.qualification_score,
          l.qualification_notes, l.missing_info, l.verified, l.follow_up_at,
-         l.marketing_draft, l.dedupe_key,
+         l.marketing_draft, l.dedupe_key, l.analysis_mode, l.ai_analysis,
          l.created_at, l.updated_at, s.name AS source_name, u.name AS owner_name
   FROM leads l
   LEFT JOIN lead_sources s ON s.id = l.source_id
@@ -1999,11 +1996,12 @@ async function recordProspectSearch(
     resultCount: number;
     status: "ok" | "unavailable" | "error";
     error?: string;
+    analysisMode?: "rules" | "deepseek";
   },
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO prospect_searches (id, user_id, service, location, customer_type, provider, query, result_count, status, error)
-     VALUES (?, ?, ?, ?, ?, 'exa', ?, ?, ?, ?)`,
+    `INSERT INTO prospect_searches (id, user_id, service, location, customer_type, provider, query, result_count, status, error, analysis_mode)
+     VALUES (?, ?, ?, ?, ?, 'exa', ?, ?, ?, ?, ?)`,
   )
     .bind(
       input.id,
@@ -2015,6 +2013,7 @@ async function recordProspectSearch(
       input.resultCount,
       input.status,
       input.error ?? "",
+      input.analysisMode ?? "rules",
     )
     .run();
 }
@@ -2040,7 +2039,7 @@ async function handleProspects(
         configured: search.configured,
         available: search.available,
         reason: search.reason ?? null,
-        maxResults: 10,
+        maxResults: 5,
       },
       ai: {
         mode: ai.mode,
@@ -2066,18 +2065,24 @@ async function handleProspects(
     const service = requiredStr(body, "service", 120);
     const location = requiredStr(body, "location", 120);
     const customerType = requiredStr(body, "customerType", 120);
-    const limit = optionalInt(body, "limit", 1, 10) ?? 5;
+    const limit = optionalInt(body, "limit", 1, 5) ?? 5;
     const query = buildProspectQuery({ service, location, customerType });
     const searchId = newId();
 
     try {
       const response = await searchExa(env, { query, numResults: limit });
       const retrievedAt = nowIso();
-      const prospects = prospectsFromSearch(
+      const rulesProspects = prospectsFromSearch(
         response.results,
         { service, location, customerType },
         retrievedAt,
       );
+      const analysis = await analyseProspectsWithDeepSeek(
+        env,
+        rulesProspects,
+        { service, location, customerType },
+      );
+      const prospects = analysis.prospects;
 
       await recordProspectSearch(env, {
         id: searchId,
@@ -2088,14 +2093,16 @@ async function handleProspects(
         query,
         resultCount: prospects.length,
         status: "ok",
+        analysisMode: analysis.mode,
       });
 
       for (const prospect of prospects) {
         await env.DB.prepare(
           `INSERT INTO prospect_candidates
              (id, search_id, company_name, website, source_url, summary, contact_name, email, phone,
-              evidence, retrieved_at, qualification_score, qualification_notes, missing_info, verified, dedupe_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              evidence, retrieved_at, qualification_score, qualification_notes, missing_info, verified, dedupe_key,
+              analysis_mode, ai_analysis)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             newId(),
@@ -2114,6 +2121,8 @@ async function handleProspects(
             JSON.stringify(prospect.missingInfo),
             prospect.verified ? 1 : 0,
             prospect.dedupeKey,
+            prospect.analysisMode,
+            prospect.aiAnalysis,
           )
           .run();
       }
@@ -2122,6 +2131,9 @@ async function handleProspects(
         provider: "exa",
         resultCount: prospects.length,
         limit,
+        analysisMode: analysis.mode,
+        analysisModel: analysis.model ?? null,
+        analysisReason: analysis.reason ?? null,
       });
 
       const candidates = await env.DB.prepare(
@@ -2142,6 +2154,9 @@ async function handleProspects(
             resultCount: prospects.length,
             retrievedAt,
             requestId: response.requestId ?? null,
+            analysisMode: analysis.mode,
+            analysisModel: analysis.model ?? null,
+            analysisWarning: analysis.reason ?? null,
           },
           candidates: candidates.results.map(candidatePayload),
         },
@@ -2283,8 +2298,8 @@ async function handleProspects(
          (id, company_name, contact_name, email, phone, source_id, status, owner_user_id, notes,
           consent_status, do_not_contact, website, source_url, evidence, retrieved_at,
           qualification_score, qualification_notes, missing_info, verified, follow_up_at,
-          marketing_draft, dedupe_key)
-       VALUES (?, ?, ?, ?, ?, 'source_exa', 'new', ?, ?, 'unknown', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          marketing_draft, dedupe_key, analysis_mode, ai_analysis)
+       VALUES (?, ?, ?, ?, ?, 'source_exa', 'new', ?, ?, 'unknown', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         leadId,
@@ -2305,6 +2320,8 @@ async function handleProspects(
         followUpAt,
         marketingDraft,
         candidate.dedupe_key ?? "",
+        candidate.analysis_mode ?? "rules",
+        candidate.ai_analysis ?? "",
       )
       .run();
 

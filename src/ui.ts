@@ -794,6 +794,9 @@ export const consoleHtml = String.raw`<!doctype html>
       var cards = candidates.length
         ? candidates.map(function (candidate) {
             var scoreTone = candidate.qualification_score >= 60 ? "green" : candidate.qualification_score >= 35 ? "amber" : "slate";
+            var analysisBadge = candidate.analysis_mode === "deepseek"
+              ? '<span class="badge blue">Analisis DeepSeek</span>'
+              : '<span class="badge slate">Skor peraturan</span>';
             var missing = (candidate.missingInfo || []).map(function (item) {
               return '<span class="chip">' + esc(item) + "</span>";
             }).join("");
@@ -817,11 +820,12 @@ export const consoleHtml = String.raw`<!doctype html>
             var viewDraft = hasDraft
               ? '<button class="btn btn-sm" type="button" data-action="prospect-view-draft" data-id="' + esc(candidate.id) + '">Lihat Draf</button>'
               : "";
-            return '<div class="card"><h3>' + esc(candidate.company_name) + '</h3><div class="meta">' + website + " · " + (candidate.verified ? '<span class="badge green">Disahkan sumber</span>' : '<span class="badge amber">Belum disahkan</span>') + ' <span class="badge ' + scoreTone + '">Skor ' + esc(candidate.qualification_score) + "</span></div>" +
+            return '<div class="card"><h3>' + esc(candidate.company_name) + '</h3><div class="meta">' + website + " · " + (candidate.verified ? '<span class="badge green">Disahkan sumber</span>' : '<span class="badge amber">Belum disahkan</span>') + ' <span class="badge ' + scoreTone + '">Skor ' + esc(candidate.qualification_score) + "</span> " + analysisBadge + "</div>" +
               '<p class="small" style="margin:10px 0 0">' + esc(candidate.summary) + "</p>" +
               '<div class="chips">' + (contacts.length ? contacts.join("") : '<span class="chip">Tiada hubungan awam ditemui</span>') + "</div>" +
               (missing ? '<div class="sub" style="margin-top:10px">Maklumat hilang: ' + missing + "</div>" : "") +
               '<div class="sub" style="margin-top:8px">' + esc(candidate.qualification_notes || "") + "</div>" +
+              (candidate.ai_analysis ? '<div class="sub" style="margin-top:6px"><strong>Analisis AI:</strong> ' + esc(candidate.ai_analysis) + "</div>" : "") +
               '<div style="margin-top:8px">' + evidence + source + "</div>" +
               '<div class="card-actions">' + draftButton + viewDraft + '<button class="btn btn-sm btn-primary" type="button" data-action="prospect-import" data-id="' + esc(candidate.id) + '">Import ke CRM</button><button class="btn btn-sm btn-danger" type="button" data-action="prospect-reject" data-id="' + esc(candidate.id) + '">Tolak</button></div></div>';
           }).join("")
@@ -834,7 +838,7 @@ export const consoleHtml = String.raw`<!doctype html>
           '<label>Perkhidmatan<input name="service" type="text" maxlength="120" required placeholder="contoh: automasi AI untuk operasi"></label>' +
           '<label>Lokasi<input name="location" type="text" maxlength="120" required placeholder="contoh: Kuala Lumpur"></label>' +
           '<label>Kategori pelanggan<input name="customerType" type="text" maxlength="120" required placeholder="contoh: kontraktor binaan"></label>' +
-          '<label>Had hasil<select name="limit">' + optionList({ "3": "3 hasil", "5": "5 hasil", "10": "10 hasil" }, "5") + "</select></label>" +
+          '<label>Had hasil<select name="limit">' + optionList({ "3": "3 hasil", "5": "5 hasil" }, "5") + "</select></label>" +
         '</div><div class="form-actions"><button class="btn btn-primary" type="submit"' + (status.search.available ? "" : " disabled") + ">Cari Prospek</button></div></form></div></details>" +
         '<div class="panel"><div class="panel-head"><h2>Menunggu Semakan</h2><span class="muted small">' + candidates.length + ' prospek</span></div><div class="panel-body"><div class="card-grid">' + cards + "</div></div></div>";
     });

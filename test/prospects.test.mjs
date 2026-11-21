@@ -48,35 +48,93 @@ before(async () => {
         title: "Alpha Construction Sdn Bhd | Kontraktor Binaan",
         url: "https://alpha-construction.test/about",
         publishedDate: "2026-01-01",
-        text: "Kontraktor binaan di Kuala Lumpur. Automasi AI untuk operasi. E-mel info@alpha-construction.test. Telefon +60 3-1234 5678.",
+        highlights: [
+          "Kontraktor binaan di Kuala Lumpur.",
+          "Automasi AI untuk operasi.",
+          "E-mel info@alpha-construction.test.",
+          "Telefon +60 3-1234 5678.",
+        ],
       },
       {
         title: "Alpha Construction Contact",
         url: "https://alpha-construction.test/contact",
-        text: "Kontraktor binaan Kuala Lumpur. Hubungi info@alpha-construction.test atau +60 3-1234 5678.",
+        highlights: [
+          "Kontraktor binaan Kuala Lumpur.",
+          "Hubungi info@alpha-construction.test atau +60 3-1234 5678.",
+        ],
       },
       {
         title: "Beta Renovation",
         url: "https://beta-renovation.test",
-        text: "Renovation and construction in Kuala Lumpur. Email hello@beta-renovation.test.",
+        highlights: [
+          "Renovation and construction in Kuala Lumpur.",
+          "Email hello@beta-renovation.test.",
+        ],
       },
       {
         title: "Online Casino",
         url: "https://casino.test",
-        text: "Permainan dalam talian tanpa lokasi perniagaan.",
+        highlights: ["Permainan dalam talian tanpa lokasi perniagaan."],
       },
     ],
   };
-  mock.get("https://api.exa.test").intercept({ path: "/search", method: "POST" }).reply(200, exaPayload);
-  mock.get("https://api.exa.test").intercept({ path: "/search", method: "POST" }).reply(200, exaPayload);
+  for (let index = 0; index < 8; index += 1) {
+    mock.get("https://api.exa.test").intercept({ path: "/search", method: "POST" }).reply(200, exaPayload);
+  }
+
+  const analysisContent = JSON.stringify({
+    results: [
+      {
+        url: "https://alpha-construction.test/about",
+        score: 88,
+        reason: "Relevan dengan automasi AI dan terletak di Kuala Lumpur.",
+        missing: ["Harga projek belum disahkan."],
+      },
+      {
+        url: "https://alpha-construction.test/contact",
+        score: 84,
+        reason: "Relevan dengan automasi AI dan terletak di Kuala Lumpur.",
+        missing: ["Harga projek belum disahkan."],
+      },
+      {
+        url: "https://beta-renovation.test",
+        score: 55,
+        reason: "Relevan sebahagian; skop automasi belum jelas.",
+        missing: ["Butiran perkhidmatan."],
+      },
+      {
+        url: "https://casino.test",
+        score: 5,
+        reason: "Tidak berkaitan dengan perkhidmatan atau lokasi.",
+        missing: ["Lokasi perniagaan."],
+      },
+    ],
+  });
+
+  const analysisResponse = {
+    id: "deepseek-analysis-test",
+    choices: [{ message: { content: analysisContent } }],
+    usage: { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180 },
+  };
+  const draftResponse = {
+    id: "deepseek-draft-test",
+    choices: [{ message: { content: JSON.stringify(draftJson) } }],
+    usage: { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180 },
+  };
+
+  // Research -> analysis, draft -> draft, second search -> analysis.
   mock
     .get("https://api.deepseek.test")
     .intercept({ path: "/chat/completions", method: "POST" })
-    .reply(200, {
-      id: "deepseek-draft-test",
-      choices: [{ message: { content: JSON.stringify(draftJson) } }],
-      usage: { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180 },
-    });
+    .reply(200, analysisResponse);
+  mock
+    .get("https://api.deepseek.test")
+    .intercept({ path: "/chat/completions", method: "POST" })
+    .reply(200, draftResponse);
+  mock
+    .get("https://api.deepseek.test")
+    .intercept({ path: "/chat/completions", method: "POST" })
+    .reply(200, analysisResponse);
 
   mf = new Miniflare({
     modules: true,
@@ -205,6 +263,7 @@ test("research stores evidence, deduplicates domains and ranks candidates", asyn
 
   assert.equal(response.status, 201);
   assert.equal(response.data.search.status, "ok");
+  assert.equal(response.data.search.analysisMode, "deepseek");
   searchId = response.data.search.id;
   assert.equal(response.data.candidates.length, 3, "same domain must be deduplicated");
 
@@ -230,6 +289,11 @@ test("research stores evidence, deduplicates domains and ranks candidates", asyn
   assert.ok(Array.isArray(alpha.missingInfo));
   assert.equal(alpha.verified, true);
   assert.ok(alpha.qualification_score >= beta.qualification_score);
+  assert.equal(alpha.analysis_mode, "deepseek");
+  assert.match(alpha.ai_analysis, /Relevan dengan automasi AI/);
+  assert.ok(alpha.missingInfo.some((item) => item.includes("Harga projek")));
+  assert.equal(beta.analysis_mode, "deepseek");
+  assert.ok(casino.qualification_score < beta.qualification_score);
   assert.match(alpha.email, /@alpha-construction\.test$/);
 
   const listed = await call("/api/prospects?status=new", { token: adminToken });
@@ -331,6 +395,13 @@ test("prospects can be rejected and limits are enforced", async () => {
     body: { service: "automasi", location: "Kuala Lumpur", customerType: "kontraktor", limit: 50 },
   });
   assert.equal(tooMany.status, 400);
+
+  const aboveInitialCap = await call("/api/prospects/research", {
+    method: "POST",
+    token: adminToken,
+    body: { service: "automasi", location: "Kuala Lumpur", customerType: "kontraktor", limit: 6 },
+  });
+  assert.equal(aboveInitialCap.status, 400);
 
   const viewerImport = await call(`/api/prospects/${betaCandidateId}/import`, {
     method: "POST",

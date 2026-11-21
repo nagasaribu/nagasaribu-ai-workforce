@@ -25,7 +25,7 @@ test("Exa search sends the expected request and normalizes results", async () =>
       EXA_API_KEY: "exa-secret",
       EXA_BASE_URL: "https://api.exa.test",
     },
-    { query: "kontraktor binaan Kuala Lumpur", numResults: 5 },
+    { query: "kontraktor binaan Kuala Lumpur", numResults: 10 },
     async (url, init) => {
       captured = { url, init };
       return new Response(
@@ -51,8 +51,9 @@ test("Exa search sends the expected request and normalizes results", async () =>
   assert.equal(captured.init.headers["x-api-key"], "exa-secret");
   const body = JSON.parse(captured.init.body);
   assert.equal(body.query, "kontraktor binaan Kuala Lumpur");
-  assert.equal(body.numResults, 5);
+  assert.equal(body.numResults, 5, "initial testing must cap results at 5");
   assert.equal(body.type, "auto");
+  assert.equal(body.contents.highlights, true);
 
   assert.equal(response.requestId, "exa-req-1");
   assert.equal(response.results.length, 1, "unsafe URLs must be filtered");
@@ -71,6 +72,22 @@ test("Exa HTTP errors are sanitized and never include the key", async () => {
       assert.equal(error.code, "search_http_error");
       assert.match(error.message, /status 429/);
       assert.doesNotMatch(error.message, /super-secret/);
+      return true;
+    },
+  );
+});
+
+test("invalid Exa keys are reported without leaking the key", async () => {
+  await assert.rejects(
+    searchExa(
+      { EXA_API_KEY: "invalid-key-value", EXA_BASE_URL: "https://api.exa.test" },
+      { query: "test" },
+      async () => new Response(JSON.stringify({ error: "invalid api key" }), { status: 401 }),
+    ),
+    (error) => {
+      assert.ok(error instanceof SearchError);
+      assert.equal(error.code, "search_http_error");
+      assert.doesNotMatch(error.message, /invalid-key-value/);
       return true;
     },
   );

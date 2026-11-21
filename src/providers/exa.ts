@@ -110,7 +110,7 @@ export async function searchExa(
 
   const apiKey = (env.EXA_API_KEY ?? "").trim();
   const endpoint = searchEndpoint(env.EXA_BASE_URL);
-  const numResults = Math.min(Math.max(options.numResults ?? 5, 1), 10);
+  const numResults = Math.min(Math.max(options.numResults ?? 5, 1), 5);
   const controller = new AbortController();
   const timeoutMs = Math.min(Math.max(options.timeoutMs ?? 20_000, 1_000), 60_000);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -127,7 +127,7 @@ export async function searchExa(
         type: "auto",
         numResults,
         contents: {
-          text: { maxCharacters: 2000 },
+          highlights: true,
         },
       }),
       signal: controller.signal,

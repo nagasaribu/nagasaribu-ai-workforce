@@ -28,7 +28,7 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 
 ## Phase 4 — Customer Acquisition Engine
 - Exa public-web search adapter with no-fake-results behaviour when unconfigured
-- Explainable prospect qualification with evidence, retrieval dates and missing information
+- Explainable prospect qualification with DeepSeek-assisted scoring, evidence, retrieval dates and missing information
 - Administrator review before CRM import with company/source deduplication
 - Marketing AI outreach drafts through DeepSeek Live; no automatic sending
 - Malay **Cari Prospek** interface with source links and approval controls

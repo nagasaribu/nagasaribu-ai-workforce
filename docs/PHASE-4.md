@@ -14,9 +14,11 @@
 - Credential: `EXA_API_KEY` as a Cloudflare Secret.
 - Optional `EXA_BASE_URL` for testing (HTTPS only).
 - If `EXA_API_KEY` is absent, search reports **unavailable** and no results are generated.
+- Request: `POST https://api.exa.ai/search` with `type: "auto"`, `contents.highlights: true`
+  and `numResults` capped at **5** for initial operation.
 - The adapter never fabricates results and never exposes the API key.
-- Result limit: 1–10 per search.
-- Rate limit: 6 searches per user per 10 minutes.
+- Result limit: 1–5 per search.
+- Rate limit: 6 searches per user per 10 minutes (best-effort per isolate).
 
 ### Required secret
 ```bash
@@ -34,10 +36,14 @@ The pipeline:
 1. Builds a public-web query.
 2. Calls Exa.
 3. Extracts company name, website, source URL, summary and public business contact details.
-4. Scores relevance (service 40, location 20, evidence 20, public contact 10, customer type 5).
-5. Records evidence, retrieval date and missing information.
-6. Deduplicates results by website domain or normalized company name.
-7. Stores reviewed candidates in `prospect_candidates` with status `new`.
+4. Applies deterministic evidence scoring (service 40, location 20, evidence 20, public contact 10,
+   customer type 5).
+5. When DeepSeek is live, sends the evidence to DeepSeek for an independent relevance score,
+   explanation and missing-information list. The AI never supplies company/contact data.
+6. Falls back to rule-based scoring when DeepSeek is unavailable or returns invalid JSON.
+7. Records evidence, retrieval date, analysis mode and missing information.
+8. Deduplicates results by website domain or normalized company name.
+9. Stores reviewed candidates in `prospect_candidates` with status `new`.
 
 Unverified or incomplete records are shown as **Belum disahkan** and list what is missing.
 
@@ -80,6 +86,10 @@ The Malay **Cari Prospek** tab is available to administrators and managers:
 - `prospect_searches` and `prospect_candidates`.
 - Exa lead source.
 
+`migrations/0005_deepseek_prospect_analysis.sql` adds:
+- `analysis_mode` to searches, candidates and leads.
+- `ai_analysis` to candidates and leads.
+
 ## Security and privacy
 - Research, import, reject and draft endpoints require authenticated administrator/manager access.
 - Viewer and agent roles are denied prospect management.
@@ -89,14 +99,23 @@ The Malay **Cari Prospek** tab is available to administrators and managers:
 - No outbound messaging endpoints exist.
 
 ## Tests
-`npm test` covers 57 tests, including:
-- Exa request shape, filtered results, sanitized errors, timeouts and missing-key behaviour.
+`npm test` covers 65 tests, including:
+- Exa request shape (`highlights: true`, max 5), filtered results, invalid keys, sanitized
+  errors, timeouts and missing-key behaviour.
+- DeepSeek analysis parsing, score clamping, missing-information merging and no-data invention.
 - Qualification scoring, contact extraction, deduplication and ranking.
 - Mock-transport research through the full Worker API.
 - Administrator review, draft generation, CRM import and duplicate blocking.
-- Audit log coverage and rate/result limits.
+- Audit log coverage, rate-limiter windows and result limits.
 
 ## Production status
 - Exa search is **unavailable** until `EXA_API_KEY` is configured.
 - No production leads or prospect candidates were created by deployment.
-- DeepSeek remains live for task execution and is required for draft generation.
+- One failed, zero-result search record exists from the unavailable-path verification.
+- DeepSeek is live for task execution, prospect analysis and draft generation.
+
+## Estimated API usage at initial volume
+- One search = 1 Exa search request (maximum 5 results) + 1 DeepSeek analysis call.
+- Draft generation = 1 additional DeepSeek call per candidate.
+- With the default 6-search window, the ceiling is 6 Exa searches and 6 analysis calls per
+  10 minutes per isolate, before drafts.

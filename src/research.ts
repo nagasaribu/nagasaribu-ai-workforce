@@ -28,6 +28,8 @@ export interface DiscoveredProspect {
   missingInfo: string[];
   verified: boolean;
   dedupeKey: string;
+  analysisMode: "rules" | "deepseek";
+  aiAnalysis: string;
 }
 
 const STOPWORDS = new Set([
@@ -220,6 +222,8 @@ export function scoreProspect(
     missingInfo,
     verified,
     dedupeKey: dedupeKey(companyName, website),
+    analysisMode: "rules",
+    aiAnalysis: "",
   };
 }
 
