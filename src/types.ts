@@ -30,6 +30,8 @@ export interface TelegramBindings {
   TELEGRAM_WEBHOOK_SECRET?: string;
   TELEGRAM_API_BASE?: string;
   TELEGRAM_BOOTSTRAP_TOKEN?: string;
+  CHAT_CONTEXT_MESSAGES?: string;
+  CHAT_CONTEXT_CHARS?: string;
 }
 
 export interface Env extends AiBindings, MetaBindings, SearchBindings, TelegramBindings {

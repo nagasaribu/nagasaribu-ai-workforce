@@ -386,7 +386,60 @@ test("response modes persist between messages and are shown by /mode", async () 
   assert.match(lastSent().text, /Mod Jawapan: Simple/);
 });
 
+test("Telegram conversation history and modes are shared with web chat", async () => {
+  const webMode = await call("/api/chat/mode", {
+    method: "POST",
+    token: adminToken,
+    body: { mode: "deep_thinking" },
+  });
+  assert.equal(webMode.status, 200);
+
+  const telegramMode = await sendUpdate(messageUpdate(2040, "/mode"));
+  assert.equal(telegramMode.status, 200);
+  assert.match(lastSent().text, /Mod Jawapan: Deep Thinking/);
+
+  const tasksBefore = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  const greeting = await sendUpdate(messageUpdate(2041, "Hai SARA"));
+  assert.equal(greeting.status, 200);
+  assert.doesNotMatch(lastSent().text, /Kelulusan Diperlukan/);
+  const tasksAfter = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  assert.equal(tasksAfter.count, tasksBefore.count, "greeting must not create a task");
+
+  const conversation = await dbFirst(
+    "SELECT id FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
+    adminId,
+  );
+  assert.ok(conversation);
+  const messages = await dbAll(
+    "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at ASC",
+    conversation.id,
+  );
+  assert.ok(messages.results.some((message) => message.role === "user" && message.content === "Hai SARA"));
+  assert.ok(messages.results.some((message) => message.role === "assistant"));
+
+  const web = await call("/api/chat", { token: adminToken });
+  assert.equal(web.status, 200);
+  assert.equal(web.data.conversation.id, conversation.id);
+  assert.ok(
+    web.data.messages.some(
+      (message) => message.role === "user" && message.content === "Hai SARA",
+    ),
+  );
+  assert.equal(web.data.mode, "deep_thinking");
+
+  const reset = await call("/api/chat/mode", {
+    method: "POST",
+    token: adminToken,
+    body: { mode: "human" },
+  });
+  assert.equal(reset.status, 200);
+});
+
 test("natural-language tasks are recorded and executed through SARA", async () => {
+  const setSimple = await sendUpdate(messageUpdate(2042, "/simple"));
+  assert.equal(setSimple.status, 200);
+  assert.match(lastSent().text, /Mod Jawapan: Simple/);
+
   const response = await sendUpdate(
     messageUpdate(2004, "Sediakan ringkasan operasi mingguan untuk pasukan."),
   );

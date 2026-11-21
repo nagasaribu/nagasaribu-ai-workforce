@@ -115,6 +115,26 @@ export type TelegramTaskRunner = (
   input: TelegramTaskInput,
 ) => Promise<TelegramTaskResult>;
 
+export interface TelegramConversationInput {
+  text: string;
+  chatId: string;
+  telegramUserId: string;
+  messageId: number;
+  responseMode: ResponseMode;
+}
+
+export interface TelegramConversationResult {
+  content: string;
+  duplicate?: boolean;
+}
+
+export type TelegramConversationResponder = (
+  env: Env,
+  request: Request,
+  user: AuthUser,
+  input: TelegramConversationInput,
+) => Promise<TelegramConversationResult>;
+
 export const TELEGRAM_COMMANDS = [
   { command: "start", description: "Mulakan SARA" },
   { command: "help", description: "Panduan arahan" },
@@ -1586,6 +1606,8 @@ async function handleAuthorizedMessage(
   account: TelegramAccountRow,
   text: string,
   runner: TelegramTaskRunner,
+  conversationResponder: TelegramConversationResponder,
+  messageId: number,
   chatId: string,
   telegramUserId: string,
   fetchImpl: typeof fetch,
@@ -1700,34 +1722,23 @@ async function handleAuthorizedMessage(
     return;
   }
 
-  if (!limitStore(taskRate, `task:${user.id}`, 6, 10 * 60 * 1000)) {
-    await audit(env, request, user.id, "telegram.task.rate_limited", "telegram", telegramUserId, {
-      chatId,
-    });
-    await reply(
-      env,
-      chatId,
-      "⚠️ Had pelaksanaan tugasan dicapai. Sila cuba selepas 10 minit.",
-      fetchImpl,
-    );
-    return;
-  }
-
-  const requiresApproval = isExternalAction(taskText);
-  const result = await runner(env, request, user, {
+  const result = await conversationResponder(env, request, user, {
     text: taskText,
-    requiresApproval,
-    responseMode,
-    telegramUserId,
     chatId,
+    telegramUserId,
+    messageId,
+    responseMode,
   });
-  await reply(env, chatId, result.reply, fetchImpl);
+  if (!result.duplicate && result.content) {
+    await reply(env, chatId, escapeHtml(result.content), fetchImpl);
+  }
 }
 
 export async function handleTelegramWebhook(
   request: Request,
   env: Env,
   runner: TelegramTaskRunner,
+  conversationResponder: TelegramConversationResponder,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
   if (request.method !== "POST") {
@@ -1873,6 +1884,8 @@ export async function handleTelegramWebhook(
       account,
       text,
       runner,
+      conversationResponder,
+      message.message_id,
       chatId,
       telegramUserId,
       fetchImpl,

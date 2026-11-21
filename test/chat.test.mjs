@@ -214,6 +214,105 @@ test("conversation history survives reloads", async () => {
   assert.equal(detail.data.messages.length, 2);
 });
 
+test("greetings, general questions and opinions do not create tasks", async () => {
+  const before = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  const cases = [
+    ["Hai SARA", "conversation-greeting-1"],
+    ["Apa itu waterproofing?", "conversation-question-1"],
+    ["Apa pendapat awak tentang strategi pemasaran kita?", "conversation-opinion-1"],
+  ];
+  for (const [message, clientMessageId] of cases) {
+    const response = await chat(message, { clientMessageId });
+    assert.equal(response.status, 200);
+    assert.equal(response.data.intent, "conversation");
+    assert.equal(response.data.taskId, undefined);
+    assert.ok(response.data.messages.length >= 2);
+  }
+  const after = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  assert.equal(after.count, before.count, "conversation must not create tasks");
+});
+
+test("follow-up questions persist and retain project context", async () => {
+  const before = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  const first = await chat("Projek Alpha ialah projek waterproofing di Selangor.", {
+    clientMessageId: "context-project-1",
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.data.intent, "conversation");
+
+  const followUp = await chat("Bagaimana margin projek itu?", {
+    clientMessageId: "context-project-2",
+  });
+  assert.equal(followUp.status, 200);
+  assert.equal(followUp.data.intent, "conversation");
+  assert.equal(followUp.data.taskId, undefined);
+
+  const history = await call("/api/chat", { token: adminToken });
+  const contents = history.data.messages.map((message) => message.content);
+  assert.ok(contents.includes("Projek Alpha ialah projek waterproofing di Selangor."));
+  assert.ok(contents.includes("Bagaimana margin projek itu?"));
+
+  const after = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  assert.equal(after.count, before.count, "follow-up conversation must not create a task");
+});
+
+test("status questions use actual read-only system data", async () => {
+  const before = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  const stats = await dbFirst(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN execution_state NOT IN ('completed','cancelled') THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN execution_state = 'completed' THEN 1 ELSE 0 END) AS completed
+     FROM tasks`,
+  );
+  const approvals = await dbFirst(
+    "SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending'",
+  );
+
+  const response = await chat("Semak status sistem kita", {
+    clientMessageId: "status-readonly-1",
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.data.intent, "read_only_system_query");
+  assert.equal(response.data.taskId, undefined);
+  const assistant = response.data.messages[response.data.messages.length - 1];
+  assert.match(assistant.content, /D1 sihat/);
+  assert.match(assistant.content, new RegExp(`${Number(stats.active)} tugasan aktif`));
+  assert.match(assistant.content, new RegExp(`${Number(stats.completed)} selesai`));
+  assert.match(assistant.content, new RegExp(`${Number(approvals.count)} kelulusan menunggu`));
+  assert.match(assistant.content, /DeepSeek/);
+  assert.match(assistant.content, /Telegram/);
+
+  const after = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  assert.equal(after.count, before.count, "status query must not create a task");
+});
+
+test("negative instructions do not trigger approval", async () => {
+  const before = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  const conversation = await chat("Jangan hantar sebarang mesej kepada pelanggan.", {
+    clientMessageId: "negative-conversation-1",
+  });
+  assert.equal(conversation.status, 200);
+  assert.equal(conversation.data.intent, "conversation");
+  assert.equal(conversation.data.taskId, undefined);
+
+  const draft = await chat(
+    "Jangan hantar sebarang mesej; sediakan draf strategi pemasaran.",
+    { clientMessageId: "negative-draft-1" },
+  );
+  assert.equal(draft.status, 200);
+  assert.equal(draft.data.intent, "internal_work");
+  assert.ok(draft.data.taskId);
+  const task = await dbFirst("SELECT metadata FROM tasks WHERE id = ?", draft.data.taskId);
+  assert.notEqual(JSON.parse(task.metadata).requiresApproval, true);
+  const approvals = await dbFirst(
+    "SELECT COUNT(*) AS count FROM approvals WHERE entity_id = ?",
+    draft.data.taskId,
+  );
+  assert.equal(approvals.count, 0);
+  const after = await dbFirst("SELECT COUNT(*) AS count FROM tasks");
+  assert.ok(after.count > before.count);
+});
+
 test("chat response modes persist and affect task metadata", async () => {
   const setSimple = await call("/api/chat/mode", {
     method: "POST",
@@ -231,7 +330,7 @@ test("chat response modes persist and affect task metadata", async () => {
   const current = await call("/api/chat", { token: adminToken });
   assert.equal(current.data.mode, "simple");
 
-  const simpleTask = await chat("Ringkaskan status operasi mingguan.", {
+  const simpleTask = await chat("Sediakan ringkasan operasi mingguan.", {
     clientMessageId: "chat-simple-1",
   });
   assert.equal(simpleTask.status, 200);
@@ -258,10 +357,12 @@ test("SARA auto-routes work to specialist agents", async () => {
     ["Beri cadangan teknikal untuk automasi proses operasi.", technicalId, "Technical AI"],
     ["Sediakan brief kreatif untuk kempen media sosial.", creativeId, "Creative Studio"],
     ["Cari pelanggan baharu untuk perkhidmatan waterproofing.", marketingId, "Marketing AI"],
+    ["Cari 20 prospek waterproofing.", marketingId, "Marketing AI"],
   ];
-  for (const [message, expectedId, expectedName] of cases) {
-    const response = await chat(message, { clientMessageId: `route-${expectedName}` });
+  for (const [index, [message, expectedId, expectedName]] of cases.entries()) {
+    const response = await chat(message, { clientMessageId: `route-${index}-${expectedName}` });
     assert.equal(response.status, 200);
+    assert.ok(response.data.taskId, `${message} should create a task; intent=${response.data.intent}`);
     const task = await dbFirst("SELECT assigned_agent_id FROM tasks WHERE id = ?", response.data.taskId);
     assert.equal(task.assigned_agent_id, expectedId, `${message} should route to ${expectedName}`);
   }

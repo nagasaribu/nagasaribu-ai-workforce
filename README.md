@@ -59,12 +59,21 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Web chat idempotency, approval confirmation, conversation history and responsive UI
 - Telegram bot command menu registered with `setMyCommands`
 
+## Phase 8 — Conversational Intelligence V3
+- Explicit conversation, read-only status, internal work and external-action paths
+- General conversation no longer creates a task for every message
+- Recent D1 conversation history is passed to the model with a bounded context window
+- Dedicated SARA personality prompt and deterministic intent classifier
+- Real read-only status answers from D1, providers, agents, approvals, audit and Telegram
+- Shared conversation identity, history and modes across Web and Telegram
+
 See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
 [`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration,
 [`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine,
 [`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result,
 [`docs/PHASE-6.md`](docs/PHASE-6.md) for the Telegram command centre,
-and [`docs/PHASE-7.md`](docs/PHASE-7.md) for the conversational workspace.
+[`docs/PHASE-7.md`](docs/PHASE-7.md) for the conversational workspace,
+and [`docs/PHASE-8.md`](docs/PHASE-8.md) for conversational intelligence V3.
 
 ## Architecture decision — Database strategy (locked)
 - **Cloudflare D1 is the single primary production database.**
