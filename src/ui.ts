@@ -1068,7 +1068,7 @@ export const consoleHtml = String.raw`<!doctype html>
       node.innerHTML = [
         statusPill(checks.ai === "live" ? "DeepSeek LIVE" : "DeepSeek MOCK", checks.ai === "live" ? "green" : "amber", null),
         statusPill(checks.search === "configured" ? "Exa READY" : "Exa OFFLINE", checks.search === "configured" ? "teal" : "amber", null),
-        statusPill(checks.backup === "configured" ? "Muse Spark READY" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
+        statusPill(checks.backup === "configured" ? "Muse Spark CONFIGURED" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
         statusPill(checks.database === "ok" ? "D1 HEALTHY" : "D1 DEGRADED", checks.database === "ok" ? "green" : "red", null)
       ].join("");
     }).catch(function () {
@@ -1167,7 +1167,7 @@ export const consoleHtml = String.raw`<!doctype html>
         ? [
             statusPill(aiLive ? "DeepSeek LIVE" : "DeepSeek MOCK", aiLive ? "green" : "amber", null),
             statusPill(exaReady ? "Exa READY" : "Exa OFFLINE", exaReady ? "teal" : "amber", null),
-            statusPill(checks.backup === "configured" ? "Muse Spark READY" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
+            statusPill(checks.backup === "configured" ? "Muse Spark CONFIGURED" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
             statusPill(dbOk ? "D1 HEALTHY" : "D1 DEGRADED", dbOk ? "green" : "red", null)
           ].join("")
         : statusPill("Status sistem tidak tersedia", "slate", null);
@@ -1201,7 +1201,7 @@ export const consoleHtml = String.raw`<!doctype html>
       var activeModel = providers.active === "meta" ? (backupInfo.model || "muse-spark-1.3") : (primaryInfo.model || "deepseek-chat");
       var providerCards = [
         providerCard({ name: "DeepSeek", role: "Primary · Penjana utama", tone: "blue", icon: "bolt", status: primaryInfo.mode === "live" ? "LIVE" : "MOCK", statusTone: primaryInfo.mode === "live" ? "green" : "amber", model: primaryInfo.model || "deepseek-chat", tokens: usage.deepseekTokens || 0 }),
-        providerCard({ name: "Muse Spark", role: "Backup · Fallback automatik", tone: "violet", icon: "sparkles", status: backupInfo.available ? "READY" : "OFFLINE", statusTone: backupInfo.available ? "violet" : "slate", model: backupInfo.model || "muse-spark-1.3", tokens: usage.metaTokens || 0 }),
+        providerCard({ name: "Muse Spark", role: "Backup · Fallback automatik", tone: "violet", icon: "sparkles", status: backupInfo.available ? "CONFIGURED" : "OFFLINE", statusTone: backupInfo.available ? "violet" : "slate", model: backupInfo.model || "muse-spark-1.3", tokens: usage.metaTokens || 0 }),
         providerCard({ name: "Exa", role: "Search · Carian awam", tone: "teal", icon: "search", status: exaReady ? "READY" : "OFFLINE", statusTone: exaReady ? "teal" : "amber", model: "exa" })
       ].join("");
       var providerPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.bolt + ' Provider AI</h2><div class="status-strip">' + statusPill("Aktif: " + activeName, providers.active === "deepseek" ? "green" : providers.active === "meta" ? "violet" : "slate", null) + '</div></div><div class="panel-body"><div class="agent-grid compact">' + providerCards + '</div><div class="detail-grid" style="margin-top:16px"><div class="detail-item"><div class="label">Model Aktif</div><div class="value">' + esc(activeModel) + '</div></div><div class="detail-item"><div class="label">Jumlah Token</div><div class="value">' + esc(usage.totalTokens || 0) + '</div></div><div class="detail-item"><div class="label">Fallback</div><div class="value">' + esc(usage.fallbackEvents || 0) + ' event</div></div><div class="detail-item"><div class="label">Ralat Penyedia</div><div class="value">' + esc(usage.providerErrors || 0) + '</div></div></div><div class="panel-sub" style="margin-top:12px">Fallback automatik hanya untuk timeout, ralat rangkaian, HTTP 429 dan HTTP 5xx. Ralat pengesahan tidak dicuba semula.</div></div></div>';

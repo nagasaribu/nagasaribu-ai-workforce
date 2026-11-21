@@ -34,10 +34,17 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Malay **Cari Prospek** interface with source links and approval controls
 - Search/draft rate limits, result limits and audit logging
 
+## Phase 5 — Multi-Model Router
+- DeepSeek remains primary; Meta Muse Spark 1.3 is the single-attempt backup
+- Automatic fallback only for timeouts, network failures, HTTP 429 and HTTP 5xx
+- No fallback on authentication, configuration or invalid-request errors
+- Provider/model/fallback recorded per task; token usage and provider errors in the dashboard
+- Muse Spark is configured but not yet verified live at the 100-token high-reasoning limit
+
 See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
-[`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration, and
-[`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine and the
-`EXA_API_KEY` requirement.
+[`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration,
+[`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine,
+and [`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result.
 
 ## Initial modules
 - SARA — orchestration and operations
