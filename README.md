@@ -46,6 +46,18 @@ See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
 [`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine,
 and [`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result.
 
+## Architecture decision — Database strategy (locked)
+- **Cloudflare D1 is the single primary production database.**
+- **Supabase is not used.**
+- **No second database and no duplicate authentication/CRM records.**
+- All existing D1 migrations and production data must remain intact.
+- Backend services run on Cloudflare Workers.
+- Cloudflare R2 may be considered for future media storage only, not as a second record database.
+- **Any future production migration requires explicit administrator approval.**
+
+See [`docs/ADR-001-database-strategy.md`](docs/ADR-001-database-strategy.md) and
+[`migrations/README.md`](migrations/README.md).
+
 ## Initial modules
 - SARA — orchestration and operations
 - QS AI — quantity surveying and construction
@@ -77,7 +89,9 @@ Open the local URL and complete the one-time administrator setup.
 
 ## Deploy
 ```bash
+# Production migration requires explicit administrator approval before running:
 npm run db:migrate:remote
+
 npm run db:seed:agents:remote
 npm run deploy
 ```
