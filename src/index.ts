@@ -41,12 +41,30 @@ import {
   getTelegramSummary,
   handleTelegramBootstrap,
   handleTelegramWebhook,
+  isExternalAction,
   registerTelegramWebhook,
   revokeTelegramLink,
+  setTelegramResponseMode,
   TelegramError,
   type TelegramTaskInput,
   type TelegramTaskResult,
 } from "./telegram.ts";
+import {
+  MODE_DESCRIPTIONS,
+  MODE_LABELS,
+  RESPONSE_MODES,
+  isResponseMode,
+  normalizeResponseMode,
+  type ResponseMode,
+} from "./response-mode.ts";
+import {
+  modeVisual,
+  renderApprovalRequest,
+  renderTaskResponse,
+  renderWebTaskResponse,
+  taskRef,
+} from "./telegram-format.ts";
+import { getUserResponseMode, setUserResponseMode } from "./user-preferences.ts";
 
 const SERVICE = "nagasaribu-ai-workforce";
 const PHASE = 2;
@@ -328,6 +346,7 @@ function clearRateLimit(key: string): void {
 const searchAttempts = new Map<string, { count: number; resetAt: number }>();
 const draftAttempts = new Map<string, { count: number; resetAt: number }>();
 const telegramPairingAttempts = new Map<string, { count: number; resetAt: number }>();
+const chatAttempts = new Map<string, { count: number; resetAt: number }>();
 
 function consumeRateLimit(
   store: Map<string, { count: number; resetAt: number }>,
@@ -577,7 +596,7 @@ async function handleAuth(request: Request, env: Env, path: string): Promise<Res
   throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
 }
 
-async function handleDashboard(env: Env): Promise<Response> {
+async function handleDashboard(env: Env, user: AuthUser): Promise<Response> {
   const [
     taskStats,
     agentStats,
@@ -707,6 +726,7 @@ async function handleDashboard(env: Env): Promise<Response> {
   const ai = getProviderStatus(env);
   const router = getRouterStatus(env);
   const telegram = await getTelegramSummary(env);
+  const currentResponseMode = await getUserResponseMode(env, user.id);
 
   return json({
     tasks: {
@@ -776,9 +796,12 @@ async function handleDashboard(env: Env): Promise<Response> {
       botUsername: telegram.botUsername,
       webhookUrl: telegram.webhookUrl,
       webhookCheckedAt: telegram.webhookCheckedAt,
+      commandsRegisteredAt: telegram.commandsRegisteredAt,
       linkedAccounts: telegram.linkedAccounts,
       activeLinks: telegram.activeLinks,
       pendingPairingCodes: telegram.pendingPairingCodes,
+      responseModes: telegram.responseModes,
+      currentMode: currentResponseMode,
       lastUpdateAt: telegram.lastUpdateAt,
       lastMessageAt: telegram.lastMessageAt,
     },
@@ -1251,16 +1274,87 @@ async function executeTask(
     );
   }
 }
-const TELEGRAM_AGENT_DIRECTIVE_RE =
+const AGENT_DIRECTIVE_RE =
   /\b(?:gunakan|tugaskan|untuk|assign(?:kan)?(?:\s+to)?|use|to)\s+(marketing ai|qs ai|finance ai|technical ai|creative studio|sara)\b/i;
 
-async function resolveTelegramAgent(
-  env: Env,
-  text: string,
-): Promise<{ id: string; name: string } | null> {
-  const match = TELEGRAM_AGENT_DIRECTIVE_RE.exec(text);
-  if (!match) return null;
-  const name = match[1].replace(/\s+/g, " ").trim();
+const AGENT_HINTS: Array<{ name: string; words: string[] }> = [
+  {
+    name: "QS AI",
+    words: [
+      "qs",
+      "kos",
+      "anggaran",
+      "tender",
+      "bill of quantities",
+      "binaan",
+      "pembinaan",
+      "kontrak",
+      "ukur",
+      "projek",
+    ],
+  },
+  {
+    name: "Finance AI",
+    words: [
+      "kewangan",
+      "finance",
+      "bajet",
+      "aliran tunai",
+      "invois",
+      "untung",
+      "rugi",
+      "cukai",
+      "pembayaran",
+    ],
+  },
+  {
+    name: "Technical AI",
+    words: [
+      "teknikal",
+      "technical",
+      "sistem",
+      "integrasi",
+      "automasi",
+      "infrastruktur",
+      "kod",
+      "api",
+      "cloud",
+      "sokongan",
+    ],
+  },
+  {
+    name: "Creative Studio",
+    words: [
+      "kreatif",
+      "creative",
+      "reka bentuk",
+      "poster",
+      "video",
+      "imej",
+      "gambar",
+      "copywriting",
+      "kandungan visual",
+      "brief",
+    ],
+  },
+  {
+    name: "Marketing AI",
+    words: [
+      "pemasaran",
+      "marketing",
+      "kempen",
+      "prospek",
+      "pelanggan",
+      "iklan",
+      "kandungan",
+      "media sosial",
+      "jualan",
+      "lead",
+    ],
+  },
+];
+
+async function findActiveAgentByName(env: Env, name: string): Promise<{ id: string; name: string } | null> {
   const row = await env.DB.prepare(
     `SELECT id, name FROM agent_registry
      WHERE lower(name) = lower(?) AND status = 'active' LIMIT 1`,
@@ -1270,30 +1364,104 @@ async function resolveTelegramAgent(
   return row ?? null;
 }
 
-async function runTelegramTask(
+async function resolveChatAgent(env: Env, text: string): Promise<{ id: string; name: string } | null> {
+  const explicit = AGENT_DIRECTIVE_RE.exec(text);
+  if (explicit) {
+    const name = explicit[1].replace(/\s+/g, " ").trim();
+    const agent = await findActiveAgentByName(env, name);
+    if (agent) return agent;
+  }
+
+  const normalized = text.toLowerCase();
+  for (const hint of AGENT_HINTS) {
+    if (hint.words.some((word) => normalized.includes(word))) {
+      const agent = await findActiveAgentByName(env, hint.name);
+      if (agent) return agent;
+    }
+  }
+  return null;
+}
+
+function deriveTaskTitle(text: string): string {
+  const lines = String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (/^(sara|hai|hello|hi|assalamualaikum|salam)[,!. ]*$/i.test(line)) continue;
+    const withoutGreeting = line.replace(/^(sara|hai|hello|hi)[,!. ]+/i, "").trim();
+    const candidate = withoutGreeting || line;
+    if (candidate.length >= 3) return candidate.slice(0, 120);
+  }
+  return "Tugasan melalui sembang";
+}
+
+export interface ChatExecutionInput extends TelegramTaskInput {
+  channel: "web" | "telegram";
+}
+
+export interface ChatExecutionOutcome {
+  taskId: string;
+  title: string;
+  state: string;
+  result: string;
+  error: string;
+  agentName: string;
+  provider: string;
+  model: string;
+  responseMode: ResponseMode;
+  approvalRequired: boolean;
+  approvalReason: string;
+  external: boolean;
+  taskCreated: boolean;
+}
+
+async function runChatExecution(
   env: Env,
   request: Request,
   user: AuthUser,
-  input: TelegramTaskInput,
-): Promise<TelegramTaskResult> {
+  input: ChatExecutionInput,
+): Promise<ChatExecutionOutcome> {
+  const channel = input.channel;
+  const responseMode = normalizeResponseMode(input.responseMode);
   let taskId = (input.taskId ?? "").trim();
   let task: Record<string, unknown> | null = null;
+  let taskCreated = false;
 
   if (!taskId) {
     const text = (input.text ?? "").trim().slice(0, 5000);
     if (text.length < 3) {
-      return { taskId: "", reply: "Sila hantar arahan atau tugasan yang lebih jelas." };
+      return {
+        taskId: "",
+        title: "",
+        state: "failed",
+        result: "",
+        error: "Sila hantar arahan atau tugasan yang lebih jelas.",
+        agentName: "",
+        provider: "",
+        model: "",
+        responseMode,
+        approvalRequired: false,
+        approvalReason: "",
+        external: false,
+        taskCreated: false,
+      };
     }
 
-    const title = (text.split(/\r?\n/)[0] ?? "").trim().slice(0, 200) || "Tugasan melalui Telegram";
-    const metadata = {
-      source: "telegram",
-      telegram_user_id: input.telegramUserId,
-      telegram_chat_id: input.chatId,
+    const title = deriveTaskTitle(text);
+    const metadata: Record<string, unknown> = {
+      source: channel,
+      channel,
       requiresApproval: input.requiresApproval,
       approvalMode: input.requiresApproval ? "external_action" : "analysis_only",
+      responseMode,
     };
-    const assignedAgent = await resolveTelegramAgent(env, text);
+    if (channel === "telegram") {
+      metadata.telegram_user_id = input.telegramUserId;
+      metadata.telegram_chat_id = input.chatId;
+    }
+
+    const assignedAgent = await resolveChatAgent(env, text);
     const initialState = assignedAgent ? "assigned" : "pending";
     const columns = stateColumns(initialState);
     taskId = newId();
@@ -1318,48 +1486,91 @@ async function runTelegramTask(
       "created",
       user.id,
       assignedAgent
-        ? `Tugasan dicipta melalui Telegram dan ditugaskan kepada ${assignedAgent.name}.`
-        : "Tugasan dicipta melalui Telegram.",
+        ? `Tugasan dicipta melalui ${channel === "telegram" ? "Telegram" : "Sembang SARA"} dan ditugaskan kepada ${assignedAgent.name}.`
+        : `Tugasan dicipta melalui ${channel === "telegram" ? "Telegram" : "Sembang SARA"}.`,
       null,
       initialState,
       {
-        source: "telegram",
+        source: channel,
+        channel,
         requiresApproval: input.requiresApproval,
         approvalMode: metadata.approvalMode,
+        responseMode,
         assignedAgentId: assignedAgent?.id ?? null,
       },
     );
-    await audit(env, request, user.id, "telegram.task.create", "task", taskId, {
-      chatId: input.chatId,
-      requiresApproval: input.requiresApproval,
-      approvalMode: metadata.approvalMode,
-      assignedAgentId: assignedAgent?.id ?? null,
-    });
+    await audit(
+      env,
+      request,
+      user.id,
+      channel === "telegram" ? "telegram.task.create" : "chat.task.create",
+      "task",
+      taskId,
+      {
+        channel,
+        requiresApproval: input.requiresApproval,
+        approvalMode: metadata.approvalMode,
+        responseMode,
+        assignedAgentId: assignedAgent?.id ?? null,
+      },
+    );
+    taskCreated = true;
 
     if (input.requiresApproval) {
       return {
         taskId,
+        title,
+        state: initialState,
+        result: "",
+        error: "",
+        agentName: assignedAgent?.name ?? "SARA",
+        provider: "",
+        model: "",
+        responseMode,
+        approvalRequired: true,
+        approvalReason:
+          "Arahan ini dikesan sebagai tindakan luaran dan memerlukan pengesahan eksplisit.",
         external: true,
-        reply: [
-          "⚠️ PENGESAHAN DIPERLUKAN",
-          "",
-          `Tugasan ${taskId} telah direkodkan tetapi tidak dijalankan.`,
-          "Arahan ini dikesan sebagai tindakan luaran.",
-          "",
-          `Hantar /confirm ${taskId} untuk memberi pengesahan eksplisit.`,
-          "Tanpa pengesahan, tiada tindakan luaran akan dijalankan.",
-        ].join("\n"),
+        taskCreated,
       };
     }
 
     task = await getTask(env, taskId);
     if (!task) {
-      return { taskId, reply: `Tugasan ${taskId} tidak dijumpai.` };
+      return {
+        taskId,
+        title,
+        state: "failed",
+        result: "",
+        error: "Tugasan tidak dijumpai.",
+        agentName: assignedAgent?.name ?? "SARA",
+        provider: "",
+        model: "",
+        responseMode,
+        approvalRequired: false,
+        approvalReason: "",
+        external: false,
+        taskCreated,
+      };
     }
   } else {
     task = await getTask(env, taskId);
     if (!task) {
-      return { taskId, reply: `Tugasan ${taskId} tidak dijumpai.` };
+      return {
+        taskId,
+        title: "",
+        state: "failed",
+        result: "",
+        error: "Tugasan tidak dijumpai.",
+        agentName: "",
+        provider: "",
+        model: "",
+        responseMode,
+        approvalRequired: false,
+        approvalReason: "",
+        external: false,
+        taskCreated: false,
+      };
     }
   }
 
@@ -1378,52 +1589,117 @@ async function runTelegramTask(
       ? (data.error as Record<string, unknown>)
       : null;
 
-  await audit(env, request, user.id, "telegram.task.execute", "task", taskId, {
-    chatId: input.chatId,
-    status: response.status,
-    mode: execution?.mode ?? null,
-    provider: execution?.provider ?? null,
-    success: execution?.success ?? false,
-  });
+  await audit(
+    env,
+    request,
+    user.id,
+    channel === "telegram" ? "telegram.task.execute" : "chat.task.execute",
+    "task",
+    taskId,
+    {
+      channel,
+      status: response.status,
+      mode: execution?.mode ?? null,
+      provider: execution?.provider ?? null,
+      success: execution?.success ?? false,
+    },
+  );
 
   const title = String(updatedTask?.title ?? "Tugasan").slice(0, 160);
   const resultText = String(updatedTask?.result ?? "").trim();
   const lastError = String(updatedTask?.last_error ?? "").trim();
-  const mode = String(execution?.mode ?? "").trim();
-  const agent = execution?.agent && typeof execution.agent === "object"
-    ? (execution.agent as Record<string, unknown>)
-    : null;
+  const agent =
+    execution?.agent && typeof execution.agent === "object"
+      ? (execution.agent as Record<string, unknown>)
+      : null;
+  const agentName = String(agent?.name ?? updatedTask?.assigned_agent_name ?? "SARA");
+  const provider = String(execution?.provider ?? updatedTask?.provider ?? "");
+  const model = String(execution?.model ?? updatedTask?.provider_model ?? "");
+  const taskMetadata = parseJsonObject(task.metadata);
+  const effectiveMode = normalizeResponseMode(input.responseMode ?? taskMetadata.responseMode);
+  const finalState = String(
+    updatedTask?.execution_state ?? updatedTask?.status ?? (response.ok ? "completed" : "failed"),
+  );
 
   if (!response.ok) {
     const code = String(error?.code ?? "");
     const message = String(error?.message ?? lastError ?? "Pelaksanaan gagal.").slice(0, 1200);
-    const confirmation =
-      code === "approval_required"
-        ? `\n\nHantar /confirm ${taskId} untuk memberi pengesahan eksplisit.`
-        : "";
     return {
       taskId,
+      title,
+      state: code === "approval_required" ? "blocked" : "failed",
+      result: resultText,
+      error: message,
+      agentName,
+      provider,
+      model,
+      responseMode: effectiveMode,
+      approvalRequired: code === "approval_required",
+      approvalReason: code === "approval_required" ? message : "",
       external: code === "approval_required",
-      reply: [
-        `⚠️ Tugasan ${taskId} tidak dapat dilaksanakan.`,
-        `Tajuk: ${title}`,
-        `Sebab: ${message}${confirmation}`,
-      ].join("\n"),
+      taskCreated,
     };
   }
 
-  const lines = [
-    mode === "live" ? "✅ HASIL SARA" : "📝 DRAF (MOD MOCK)",
-    "",
-    `Tugasan: ${title}`,
-    `ID: ${taskId}`,
-  ];
-  if (agent) lines.push(`Ejen: ${String(agent.name ?? "SARA")}`);
-  if (mode) lines.push(`Mod: ${mode}`);
-  if (execution?.provider) lines.push(`Penyedia: ${String(execution.provider)}`);
-  if (mode !== "live" && lastError) lines.push("", `Nota: ${lastError}`);
-  lines.push("", resultText || "Tiada hasil teks direkodkan.");
-  return { taskId, reply: lines.join("\n") };
+  return {
+    taskId,
+    title,
+    state: finalState,
+    result: resultText,
+    error: lastError,
+    agentName,
+    provider,
+    model,
+    responseMode: effectiveMode,
+    approvalRequired: false,
+    approvalReason: "",
+    external: false,
+    taskCreated,
+  };
+}
+
+async function runTelegramTask(
+  env: Env,
+  request: Request,
+  user: AuthUser,
+  input: TelegramTaskInput,
+): Promise<TelegramTaskResult> {
+  const outcome = await runChatExecution(env, request, user, {
+    ...input,
+    channel: "telegram",
+  });
+
+  if (!outcome.taskId) {
+    return { taskId: "", reply: outcome.error || "Sila hantar arahan yang lebih jelas." };
+  }
+
+  if (outcome.approvalRequired) {
+    return {
+      taskId: outcome.taskId,
+      external: true,
+      reply: renderApprovalRequest({
+        taskId: outcome.taskId,
+        title: outcome.title,
+        reason: outcome.approvalReason,
+      }),
+    };
+  }
+
+  return {
+    taskId: outcome.taskId,
+    reply: renderTaskResponse({
+      mode: outcome.responseMode,
+      taskId: outcome.taskId,
+      title: outcome.title,
+      state: outcome.state,
+      result: outcome.result,
+      error: outcome.error,
+      agentName: outcome.agentName,
+      provider: outcome.provider,
+      model: outcome.model,
+      nextAction: `/task ${taskRef(outcome.taskId)}`,
+    }),
+  };
 }
 
 async function handleTasks(
@@ -3210,11 +3486,13 @@ async function handleTelegramApi(
       await audit(env, request, user.id, "telegram.webhook.register", "telegram", "bot", {
         url: registered.url,
         source: "dashboard",
+        commandsRegistered: registered.commandsRegistered,
       });
       return json({
         ok: true,
         url: registered.url,
         webhook: registered.webhook,
+        commandsRegistered: registered.commandsRegistered,
       });
     } catch (error) {
       const telegramError =
@@ -3231,12 +3509,683 @@ async function handleTelegramApi(
     }
   }
 
+  if (action === "mode" && method === "POST") {
+    const body = await readJson(request);
+    const rawMode = str(body, "mode", 40);
+    if (!isResponseMode(rawMode)) {
+      throw new HttpError(400, "Mod jawapan tidak sah.", "invalid_mode");
+    }
+    const targetUserId = str(body, "userId", 64) || user.id;
+    const updated = await setTelegramResponseMode(env, targetUserId, rawMode);
+    await audit(env, request, user.id, "telegram.mode.change", "telegram", targetUserId, {
+      mode: rawMode,
+      source: "dashboard",
+      updated,
+    });
+    return json({ ok: true, mode: rawMode, updated });
+  }
+
   if (action === "unlink" && method === "POST") {
     const body = await readJson(request);
     const targetUserId = str(body, "userId", 64) || user.id;
     const revoked = await revokeTelegramLink(env, targetUserId);
     await audit(env, request, user.id, "telegram.unlink", "telegram", targetUserId, { revoked });
     return json({ ok: true, revoked });
+  }
+
+  throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
+}
+
+const CHAT_WELCOME = "Selamat datang, Dato. Apa yang hendak kita selesaikan hari ini?";
+const CHAT_STARTERS = [
+  {
+    label: "Cari pelanggan",
+    prompt: "Cari pelanggan baharu untuk perkhidmatan waterproofing di Selangor.",
+  },
+  {
+    label: "Analisis QS",
+    prompt: "Sediakan analisis kos awal untuk projek pembinaan dan waterproofing.",
+  },
+  {
+    label: "Strategi pemasaran",
+    prompt: "Sediakan strategi pemasaran 7 hari untuk perkhidmatan waterproofing.",
+  },
+  {
+    label: "Analisis kewangan",
+    prompt: "Sediakan analisis kewangan dan unjuran aliran tunai bulan ini.",
+  },
+  {
+    label: "Sokongan teknikal",
+    prompt: "Beri cadangan teknikal untuk automasi proses operasi syarikat.",
+  },
+  {
+    label: "Creative Studio",
+    prompt: "Sediakan brief kreatif untuk kempen media sosial syarikat.",
+  },
+] as const;
+
+const CHAT_MODE_ALIASES: Record<string, ResponseMode> = {
+  human: "human",
+  simple: "simple",
+  deep_thinking: "deep_thinking",
+  deep: "deep_thinking",
+  "deep-thinking": "deep_thinking",
+};
+
+interface ConversationRow {
+  id: string;
+  user_id: string;
+  channel: string;
+  title: string;
+  response_mode: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string | null;
+}
+
+interface ConversationMessageRow {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  role: string;
+  content: string;
+  task_id: string | null;
+  agent_name: string;
+  provider: string;
+  model: string;
+  execution_status: string;
+  response_mode: string;
+  client_message_id: string | null;
+  metadata: string;
+  created_at: string;
+}
+
+type ConversationMessageView = Omit<ConversationMessageRow, "metadata"> & {
+  metadata: Record<string, unknown>;
+};
+
+function parseChatCommand(text: string): { command: string; args: string } | null {
+  const first = text.split(/\s+/)[0] ?? "";
+  if (!first.startsWith("/")) return null;
+  const withoutSlash = first.slice(1);
+  const at = withoutSlash.indexOf("@");
+  const command = (at >= 0 ? withoutSlash.slice(0, at) : withoutSlash).toLowerCase();
+  return { command, args: text.slice(first.length).trim() };
+}
+
+function renderWebModeMessage(mode: ResponseMode): string {
+  const visual = modeVisual(mode);
+  return [
+    `${visual.icon} Mod jawapan: ${visual.label}`,
+    MODE_DESCRIPTIONS[mode],
+    "",
+    "Tukar mod: /human, /simple, /deep_thinking.",
+  ].join("\n");
+}
+
+function renderWebHelpMessage(): string {
+  return [
+    "Panduan ringkas SARA",
+    "",
+    "/mode — lihat mod jawapan semasa",
+    "/human — jawapan mesra dan ringkas",
+    "/simple — maksimum 3–5 poin mudah",
+    "/deep_thinking — analisis strategik terperinci",
+    "/confirm <ref> — sahkan tindakan luaran",
+    "",
+    "Hantar arahan biasa untuk mencipta dan melaksanakan tugasan.",
+    "Tindakan luaran tidak akan dijalankan tanpa pengesahan.",
+  ].join("\n");
+}
+
+async function findWebConversation(
+  env: Env,
+  userId: string,
+  conversationId?: string | null,
+): Promise<ConversationRow | null> {
+  if (conversationId) {
+    const row = await env.DB.prepare(
+      `SELECT id, user_id, channel, title, response_mode, created_at, updated_at, last_message_at
+       FROM conversations WHERE id = ? AND user_id = ? AND channel = 'web'`,
+    )
+      .bind(conversationId, userId)
+      .first<ConversationRow>();
+    return row ?? null;
+  }
+  return env.DB.prepare(
+    `SELECT id, user_id, channel, title, response_mode, created_at, updated_at, last_message_at
+     FROM conversations WHERE user_id = ? AND channel = 'web'
+     ORDER BY updated_at DESC LIMIT 1`,
+  )
+    .bind(userId)
+    .first<ConversationRow>();
+}
+
+async function ensureWebConversation(
+  env: Env,
+  userId: string,
+  conversationId: string | null,
+  title: string,
+  mode: ResponseMode,
+): Promise<ConversationRow> {
+  if (conversationId) {
+    const existing = await findWebConversation(env, userId, conversationId);
+    if (!existing) throw new HttpError(404, "Perbualan tidak dijumpai.", "not_found");
+    return existing;
+  }
+
+  const latest = await findWebConversation(env, userId);
+  if (latest) return latest;
+
+  const id = newId();
+  const timestamp = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO conversations (id, user_id, channel, title, response_mode, created_at, updated_at, last_message_at)
+     VALUES (?, ?, 'web', ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, userId, title.slice(0, 200), mode, timestamp, timestamp, timestamp)
+    .run();
+  return {
+    id,
+    user_id: userId,
+    channel: "web",
+    title: title.slice(0, 200),
+    response_mode: mode,
+    created_at: timestamp,
+    updated_at: timestamp,
+    last_message_at: timestamp,
+  };
+}
+
+async function listConversationMessages(
+  env: Env,
+  conversationId: string,
+  limit = 200,
+): Promise<ConversationMessageView[]> {
+  const result = await env.DB.prepare(
+    `SELECT id, conversation_id, user_id, role, content, task_id, agent_name,
+            provider, model, execution_status, response_mode, client_message_id,
+            metadata, created_at
+     FROM conversation_messages
+     WHERE conversation_id = ?
+     ORDER BY created_at ASC LIMIT ?`,
+  )
+    .bind(conversationId, limit)
+    .all<ConversationMessageRow>();
+  return result.results.map((row) => ({
+    ...row,
+    metadata: parseJsonObject(row.metadata),
+  }));
+}
+
+async function insertUserMessage(
+  env: Env,
+  input: {
+    conversationId: string;
+    userId: string;
+    content: string;
+    responseMode: ResponseMode;
+    clientMessageId: string | null;
+  },
+): Promise<{ id: string; inserted: boolean; conversationId: string }> {
+  const id = newId();
+  const result = await env.DB.prepare(
+    `INSERT OR IGNORE INTO conversation_messages
+       (id, conversation_id, user_id, role, content, response_mode, client_message_id)
+     VALUES (?, ?, ?, 'user', ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      input.conversationId,
+      input.userId,
+      input.content,
+      input.responseMode,
+      input.clientMessageId || null,
+    )
+    .run();
+
+  if (result.meta.changes) {
+    return { id, inserted: true, conversationId: input.conversationId };
+  }
+
+  const existing = await env.DB.prepare(
+    `SELECT id, conversation_id FROM conversation_messages
+     WHERE user_id = ? AND client_message_id = ? LIMIT 1`,
+  )
+    .bind(input.userId, input.clientMessageId || "")
+    .first<{ id: string; conversation_id: string }>();
+  return {
+    id: existing?.id ?? "",
+    inserted: false,
+    conversationId: existing?.conversation_id ?? input.conversationId,
+  };
+}
+
+async function insertAssistantMessage(
+  env: Env,
+  input: {
+    conversationId: string;
+    userId: string;
+    content: string;
+    responseMode: ResponseMode;
+    taskId?: string | null;
+    agentName?: string;
+    provider?: string;
+    model?: string;
+    executionStatus?: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<string> {
+  const id = newId();
+  await env.DB.prepare(
+    `INSERT INTO conversation_messages
+       (id, conversation_id, user_id, role, content, task_id, agent_name, provider, model,
+        execution_status, response_mode, metadata)
+     VALUES (?, ?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      input.conversationId,
+      input.userId,
+      input.content,
+      input.taskId || null,
+      (input.agentName ?? "").slice(0, 120),
+      (input.provider ?? "").slice(0, 80),
+      (input.model ?? "").slice(0, 160),
+      (input.executionStatus ?? "").slice(0, 40),
+      input.responseMode,
+      JSON.stringify(input.metadata ?? {}),
+    )
+    .run();
+  return id;
+}
+
+async function touchConversation(
+  env: Env,
+  conversationId: string,
+  mode: ResponseMode,
+  title: string,
+): Promise<void> {
+  const timestamp = nowIso();
+  await env.DB.prepare(
+    `UPDATE conversations
+     SET title = CASE WHEN title = '' THEN ? ELSE title END,
+         response_mode = ?, updated_at = ?, last_message_at = ?
+     WHERE id = ?`,
+  )
+    .bind(title.slice(0, 200), mode, timestamp, timestamp, conversationId)
+    .run();
+}
+
+async function chatPayload(
+  env: Env,
+  userId: string,
+  conversation: ConversationRow | null,
+  mode: ResponseMode,
+): Promise<Record<string, unknown>> {
+  const messages = conversation
+    ? await listConversationMessages(env, conversation.id)
+    : [];
+  return {
+    conversation,
+    messages,
+    mode,
+    welcome: CHAT_WELCOME,
+    starters: CHAT_STARTERS,
+  };
+}
+
+async function resolveWebTaskRef(
+  env: Env,
+  userId: string,
+  raw: string,
+): Promise<string | null> {
+  const ref = String(raw ?? "").trim().replace(/^#/, "");
+  if (!/^[a-f0-9-]{1,36}$/i.test(ref)) return null;
+  if (ref.length >= 36) {
+    const row = await env.DB.prepare(
+      `SELECT id FROM tasks WHERE id = ? AND (created_by = ? OR assigned_user_id = ?)`,
+    )
+      .bind(ref, userId, userId)
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  }
+  const result = await env.DB.prepare(
+    `SELECT id FROM tasks
+     WHERE id LIKE ? AND (created_by = ? OR assigned_user_id = ?)
+     ORDER BY created_at DESC LIMIT 2`,
+  )
+    .bind(`${ref}%`, userId, userId)
+    .all<{ id: string }>();
+  return result.results.length === 1 ? result.results[0].id : null;
+}
+
+async function confirmWebChatTask(
+  env: Env,
+  request: Request,
+  user: AuthUser,
+  ref: string,
+  responseMode: ResponseMode,
+): Promise<ChatExecutionOutcome> {
+  const taskId = await resolveWebTaskRef(env, user.id, ref);
+  if (!taskId) {
+    return {
+      taskId: "",
+      title: "",
+      state: "failed",
+      result: "",
+      error: "Tugasan tidak dijumpai atau rujukan tidak tepat.",
+      agentName: "",
+      provider: "",
+      model: "",
+      responseMode,
+      approvalRequired: false,
+      approvalReason: "",
+      external: false,
+      taskCreated: false,
+    };
+  }
+
+  const task = await env.DB.prepare(
+    `SELECT id, title, created_by, assigned_user_id, metadata FROM tasks WHERE id = ?`,
+  )
+    .bind(taskId)
+    .first<{
+      id: string;
+      title: string;
+      created_by: string | null;
+      assigned_user_id: string | null;
+      metadata: string;
+    }>();
+  if (!task || (task.created_by !== user.id && task.assigned_user_id !== user.id)) {
+    return {
+      taskId: "",
+      title: "",
+      state: "failed",
+      result: "",
+      error: "Tugasan tidak dijumpai atau bukan milik akaun ini.",
+      agentName: "",
+      provider: "",
+      model: "",
+      responseMode,
+      approvalRequired: false,
+      approvalReason: "",
+      external: false,
+      taskCreated: false,
+    };
+  }
+
+  const existing = await env.DB.prepare(
+    `SELECT id FROM approvals
+     WHERE entity_type = 'task' AND entity_id = ? AND status = 'approved'
+     ORDER BY decided_at DESC LIMIT 1`,
+  )
+    .bind(taskId)
+    .first<{ id: string }>();
+
+  if (!existing) {
+    const decidedAt = nowIso();
+    await env.DB.prepare(
+      `INSERT INTO approvals
+         (id, entity_type, entity_id, title, description, status, requested_by, decided_by,
+          decision_note, created_at, updated_at, decided_at)
+       VALUES (?, 'task', ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        newId(),
+        taskId,
+        `Pengesahan tindakan luaran: ${String(task.title).slice(0, 150)}`,
+        "Disahkan secara eksplisit melalui Sembang SARA.",
+        user.id,
+        user.id,
+        "Disahkan melalui Sembang SARA oleh pentadbir.",
+        decidedAt,
+        decidedAt,
+        decidedAt,
+      )
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO task_events (id, task_id, event_type, actor_user_id, from_status, to_status, message, metadata)
+       VALUES (?, ?, 'approval_granted', ?, NULL, NULL, ?, ?)`,
+    )
+      .bind(
+        newId(),
+        taskId,
+        user.id,
+        "Pengesahan eksplisit diterima melalui Sembang SARA.",
+        JSON.stringify({ channel: "web", userId: user.id }),
+      )
+      .run();
+    await audit(env, request, user.id, "chat.task.confirm", "task", taskId, {
+      channel: "web",
+    });
+  }
+
+  return runChatExecution(env, request, user, {
+    taskId,
+    requiresApproval: true,
+    responseMode,
+    channel: "web",
+    telegramUserId: "",
+    chatId: "",
+  });
+}
+
+function renderWebOutcome(outcome: ChatExecutionOutcome): string {
+  return renderWebTaskResponse({
+    mode: outcome.responseMode,
+    taskId: outcome.taskId,
+    title: outcome.title,
+    state: outcome.state,
+    result: outcome.result,
+    error: outcome.error,
+    agentName: outcome.agentName,
+    provider: outcome.provider,
+    model: outcome.model,
+    approvalRequired: outcome.approvalRequired,
+    approvalReason: outcome.approvalReason,
+    nextAction: outcome.approvalRequired
+      ? `Taip /confirm ${taskRef(outcome.taskId)} atau buka halaman Kelulusan.`
+      : "Buka halaman Tugas untuk butiran penuh.",
+  });
+}
+
+async function handleChat(
+  request: Request,
+  env: Env,
+  user: AuthUser,
+  segments: string[],
+  url: URL,
+): Promise<Response> {
+  const command = segments[2] ?? "";
+  const method = request.method;
+
+  if (!command && method === "GET") {
+    requirePermission(user, "tasks.read");
+    const conversationId = url.searchParams.get("conversationId");
+    let conversation: ConversationRow | null;
+    try {
+      conversation = await findWebConversation(env, user.id, conversationId);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw error;
+    }
+    if (conversationId && !conversation) {
+      throw new HttpError(404, "Perbualan tidak dijumpai.", "not_found");
+    }
+    const mode = await getUserResponseMode(env, user.id);
+    return json(await chatPayload(env, user.id, conversation, mode));
+  }
+
+  if (!command && method === "POST") {
+    requirePermission(user, "tasks.write");
+    consumeRateLimit(
+      chatAttempts,
+      `chat:${user.id}`,
+      40,
+      10 * 60 * 1000,
+      "Had mesej sembang dicapai. Sila cuba sebentar lagi.",
+    );
+
+    const body = await readJson(request);
+    const message = requiredStr(body, "message", 5000);
+    const requestedConversationId = str(body, "conversationId", 64) || null;
+    const responseModeRaw = str(body, "responseMode", 40);
+    const clientMessageId = str(body, "clientMessageId", 120) || null;
+    if (responseModeRaw && !isResponseMode(responseModeRaw)) {
+      throw new HttpError(400, "Mod jawapan tidak sah.", "invalid_mode");
+    }
+
+    let mode = responseModeRaw && isResponseMode(responseModeRaw)
+      ? responseModeRaw
+      : await getUserResponseMode(env, user.id);
+    if (responseModeRaw && isResponseMode(responseModeRaw)) {
+      await setUserResponseMode(env, user.id, mode);
+    }
+
+    const parsed = parseChatCommand(message);
+    const title = parsed ? "Sembang SARA" : deriveTaskTitle(message);
+    const conversation = await ensureWebConversation(
+      env,
+      user.id,
+      requestedConversationId,
+      title,
+      mode,
+    );
+
+    const inserted = await insertUserMessage(env, {
+      conversationId: conversation.id,
+      userId: user.id,
+      content: message,
+      responseMode: mode,
+      clientMessageId,
+    });
+
+    if (!inserted.inserted) {
+      const existingConversation = await findWebConversation(
+        env,
+        user.id,
+        inserted.conversationId,
+      );
+      const payload = await chatPayload(env, user.id, existingConversation, mode);
+      return json({ ...payload, duplicate: true });
+    }
+
+    let assistantContent = "";
+    let outcome: ChatExecutionOutcome | null = null;
+    let executionStatus = "info";
+    let taskId: string | null = null;
+    let agentName = "";
+    let provider = "";
+    let model = "";
+
+    const modeAlias = parsed ? CHAT_MODE_ALIASES[parsed.command] : undefined;
+    if (modeAlias) {
+      mode = modeAlias;
+      await setUserResponseMode(env, user.id, mode);
+      assistantContent = renderWebModeMessage(mode);
+      executionStatus = "mode";
+      await audit(env, request, user.id, "chat.mode.change", "conversation", conversation.id, {
+        mode,
+        channel: "web",
+      });
+    } else if (parsed?.command === "mode") {
+      assistantContent = renderWebModeMessage(mode);
+      executionStatus = "mode";
+    } else if (parsed?.command === "help") {
+      assistantContent = renderWebHelpMessage();
+      executionStatus = "info";
+    } else if (parsed?.command === "confirm") {
+      outcome = await confirmWebChatTask(env, request, user, parsed.args, mode);
+      assistantContent = renderWebOutcome(outcome);
+      executionStatus = outcome.state;
+      taskId = outcome.taskId || null;
+      agentName = outcome.agentName;
+      provider = outcome.provider;
+      model = outcome.model;
+    } else {
+      const requiresApproval = isExternalAction(message);
+      outcome = await runChatExecution(env, request, user, {
+        text: message,
+        requiresApproval,
+        responseMode: mode,
+        channel: "web",
+        telegramUserId: "",
+        chatId: "",
+      });
+      assistantContent = renderWebOutcome(outcome);
+      executionStatus = outcome.state;
+      taskId = outcome.taskId || null;
+      agentName = outcome.agentName;
+      provider = outcome.provider;
+      model = outcome.model;
+    }
+
+    await insertAssistantMessage(env, {
+      conversationId: conversation.id,
+      userId: user.id,
+      content: assistantContent,
+      responseMode: mode,
+      taskId,
+      agentName,
+      provider,
+      model,
+      executionStatus,
+      metadata: outcome
+        ? {
+            approvalRequired: outcome.approvalRequired,
+            external: outcome.external,
+            taskCreated: outcome.taskCreated,
+          }
+        : { command: parsed?.command ?? null },
+    });
+    await touchConversation(env, conversation.id, mode, title);
+    await audit(env, request, user.id, "chat.message", "conversation", conversation.id, {
+      mode,
+      taskId,
+      approvalRequired: outcome?.approvalRequired ?? false,
+      duplicate: false,
+    });
+
+    const updatedConversation = await findWebConversation(env, user.id, conversation.id);
+    const payload = await chatPayload(env, user.id, updatedConversation, mode);
+    return json({ ...payload, taskId, agentName, executionStatus });
+  }
+
+  if (command === "history" && method === "GET") {
+    requirePermission(user, "tasks.read");
+    const conversations = await env.DB.prepare(
+      `SELECT id, user_id, channel, title, response_mode, created_at, updated_at, last_message_at
+       FROM conversations WHERE user_id = ? AND channel = 'web'
+       ORDER BY updated_at DESC LIMIT 50`,
+    )
+      .bind(user.id)
+      .all<ConversationRow>();
+    const conversationId = url.searchParams.get("conversationId");
+    let messages: ConversationMessageView[] = [];
+    if (conversationId) {
+      const conversation = await findWebConversation(env, user.id, conversationId);
+      if (!conversation) {
+        throw new HttpError(404, "Perbualan tidak dijumpai.", "not_found");
+      }
+      messages = await listConversationMessages(env, conversation.id);
+    }
+    return json({ conversations: conversations.results, messages });
+  }
+
+  if (command === "mode" && method === "POST") {
+    requirePermission(user, "tasks.write");
+    const body = await readJson(request);
+    const modeRaw = str(body, "mode", 40);
+    if (!isResponseMode(modeRaw)) {
+      throw new HttpError(400, "Mod jawapan tidak sah.", "invalid_mode");
+    }
+    await setUserResponseMode(env, user.id, modeRaw);
+    await audit(env, request, user.id, "chat.mode.change", "user", user.id, {
+      mode: modeRaw,
+      channel: "web",
+    });
+    return json({ ok: true, mode: modeRaw });
   }
 
   throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
@@ -3263,7 +4212,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (path === "/api/dashboard" && request.method === "GET") {
     requirePermission(user, "dashboard.read");
-    return handleDashboard(env);
+    return handleDashboard(env, user);
   }
 
   if (path === "/api/ai/status" && request.method === "GET") {
@@ -3396,6 +4345,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (segments[1] === "tasks") return handleTasks(request, env, user, segments, url);
+  if (segments[1] === "chat") return handleChat(request, env, user, segments, url);
   if (segments[1] === "agents") return handleAgents(request, env, user, segments, url);
   if (segments[1] === "prospects") return handleProspects(request, env, user, segments, url);
   if (segments[1] === "leads") return handleLeads(request, env, user, segments, url);

@@ -51,11 +51,20 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Explicit `/confirm` gate for external actions
 - Duplicate `update_id` protection, rate limits, audit logging and dashboard connection status
 
+## Phase 7 — Conversational Workspace V2
+- Chat-first web workspace with persistent conversations in D1
+- Shared web/Telegram execution pipeline, agent auto-routing and task references
+- Persistent `human`, `simple` and `deep_thinking` response modes per user
+- Safe HTML Telegram formatting, `/task`, `/mode` and `/report full`
+- Web chat idempotency, approval confirmation, conversation history and responsive UI
+- Telegram bot command menu registered with `setMyCommands`
+
 See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
 [`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration,
 [`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine,
 [`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result,
-and [`docs/PHASE-6.md`](docs/PHASE-6.md) for the Telegram command centre.
+[`docs/PHASE-6.md`](docs/PHASE-6.md) for the Telegram command centre,
+and [`docs/PHASE-7.md`](docs/PHASE-7.md) for the conversational workspace.
 
 ## Architecture decision — Database strategy (locked)
 - **Cloudflare D1 is the single primary production database.**

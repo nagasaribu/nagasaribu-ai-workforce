@@ -2,6 +2,30 @@ import type { AuthUser, Env } from "./types.ts";
 import { tryConsume } from "./rate-limit.ts";
 import { getProviderStatus } from "./providers/deepseek.ts";
 import { getMetaStatus } from "./providers/meta.ts";
+import {
+  DEFAULT_RESPONSE_MODE,
+  MODE_DESCRIPTIONS,
+  MODE_ICONS,
+  MODE_LABELS,
+  RESPONSE_MODES,
+  isResponseMode,
+  normalizeResponseMode,
+  type ResponseMode,
+} from "./response-mode.ts";
+import {
+  agentVisual,
+  escapeHtml,
+  extractKeyPoints,
+  extractSummary,
+  formatAiContent,
+  modeVisual,
+  renderApprovalRequest,
+  renderTaskResponse,
+  splitHtmlMessage,
+  statusVisual,
+  taskRef,
+} from "./telegram-format.ts";
+import { getUserResponseMode, setUserResponseMode } from "./user-preferences.ts";
 
 const DEFAULT_API_BASE = "https://api.telegram.org";
 const PAIRING_TTL_MS = 10 * 60 * 1000;
@@ -73,6 +97,7 @@ export interface TelegramTaskInput {
   text?: string;
   taskId?: string;
   requiresApproval: boolean;
+  responseMode: ResponseMode;
   telegramUserId: string;
   chatId: string;
 }
@@ -90,6 +115,21 @@ export type TelegramTaskRunner = (
   input: TelegramTaskInput,
 ) => Promise<TelegramTaskResult>;
 
+export const TELEGRAM_COMMANDS = [
+  { command: "start", description: "Mulakan SARA" },
+  { command: "help", description: "Panduan arahan" },
+  { command: "human", description: "Mod jawapan mesra dan ringkas" },
+  { command: "simple", description: "Mod jawapan sangat mudah" },
+  { command: "deep_thinking", description: "Mod analisis strategik terperinci" },
+  { command: "mode", description: "Lihat mod jawapan semasa" },
+  { command: "status", description: "Ringkasan operasi" },
+  { command: "tasks", description: "Tugasan terkini" },
+  { command: "agents", description: "Status ejen AI" },
+  { command: "prospects", description: "Ringkasan prospek" },
+  { command: "report", description: "Laporan operasi" },
+  { command: "confirm", description: "Sahkan tindakan luaran" },
+] as const;
+
 interface TelegramAccountRow {
   id: string;
   user_id: string;
@@ -98,6 +138,7 @@ interface TelegramAccountRow {
   username: string;
   first_name: string;
   status: string;
+  response_mode: string;
   paired_at: string;
   last_message_at: string | null;
   user_name: string;
@@ -267,6 +308,21 @@ export async function setWebhook(
   );
 }
 
+export async function setMyCommands(
+  env: Env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  return callTelegram<boolean>(
+    env,
+    "setMyCommands",
+    {
+      commands: TELEGRAM_COMMANDS.map((command) => ({ ...command })),
+      scope: { type: "default" },
+    },
+    fetchImpl,
+  );
+}
+
 function splitMessage(text: string, max = MAX_TELEGRAM_TEXT): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];
@@ -294,7 +350,11 @@ export async function sendMessage(
   const text = String(input.text ?? "").trim();
   if (!text) throw new TelegramError("empty_message", "Mesej kosong tidak dihantar.", 400);
   const messageIds: number[] = [];
-  for (const chunk of splitMessage(text)) {
+  const chunks =
+    input.parseMode === "HTML"
+      ? splitHtmlMessage(text)
+      : splitMessage(text);
+  for (const chunk of chunks) {
     const payload: Record<string, unknown> = {
       chat_id: input.chatId,
       text: chunk,
@@ -388,20 +448,26 @@ export interface TelegramSummary {
   botUsername: string | null;
   webhookUrl: string | null;
   webhookCheckedAt: string | null;
+  commandsRegisteredAt: string | null;
   linkedAccounts: number;
   activeLinks: number;
   pendingPairingCodes: number;
+  responseModes: Record<ResponseMode, number>;
   lastUpdateAt: string | null;
   lastMessageAt: string | null;
 }
 
 export async function getTelegramSummary(env: Env): Promise<TelegramSummary> {
   const now = nowIso();
-  const [accountStats, pendingCodes, lastUpdate, lastMessage, settings] = await Promise.all([
+  const [accountStats, modeRows, pendingCodes, lastUpdate, lastMessage, settings] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
        FROM telegram_accounts`,
     ).first<{ total: number; active: number | null }>(),
+    env.DB.prepare(
+      `SELECT response_mode, COUNT(*) AS count FROM telegram_accounts
+       WHERE status = 'active' GROUP BY response_mode`,
+    ).all<{ response_mode: string; count: number }>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS count FROM telegram_pairing_codes
        WHERE used_at IS NULL AND expires_at > ?`,
@@ -416,7 +482,7 @@ export async function getTelegramSummary(env: Env): Promise<TelegramSummary> {
     }>(),
     env.DB.prepare(
       `SELECT key, value FROM system_settings
-       WHERE key IN ('telegram_bot_username', 'telegram_webhook_url', 'telegram_webhook_checked_at')`,
+       WHERE key IN ('telegram_bot_username', 'telegram_webhook_url', 'telegram_webhook_checked_at', 'telegram_commands_registered_at')`,
     ).all<{ key: string; value: string }>(),
   ]);
 
@@ -425,6 +491,16 @@ export async function getTelegramSummary(env: Env): Promise<TelegramSummary> {
 
   const botTokenConfigured = Boolean((env.TELEGRAM_BOT_TOKEN ?? "").trim());
   const webhookSecretConfigured = Boolean((env.TELEGRAM_WEBHOOK_SECRET ?? "").trim());
+  const responseModes: Record<ResponseMode, number> = {
+    human: 0,
+    simple: 0,
+    deep_thinking: 0,
+  };
+  for (const row of modeRows.results) {
+    if (isResponseMode(row.response_mode)) {
+      responseModes[row.response_mode] = Number(row.count);
+    }
+  }
 
   return {
     configured: botTokenConfigured && webhookSecretConfigured,
@@ -433,9 +509,11 @@ export async function getTelegramSummary(env: Env): Promise<TelegramSummary> {
     botUsername: setting("telegram_bot_username"),
     webhookUrl: setting("telegram_webhook_url"),
     webhookCheckedAt: setting("telegram_webhook_checked_at"),
+    commandsRegisteredAt: setting("telegram_commands_registered_at"),
     linkedAccounts: Number(accountStats?.total ?? 0),
     activeLinks: Number(accountStats?.active ?? 0),
     pendingPairingCodes: Number(pendingCodes?.count ?? 0),
+    responseModes,
     lastUpdateAt: lastUpdate?.last_at ?? null,
     lastMessageAt: lastMessage?.last_at ?? null,
   };
@@ -465,7 +543,7 @@ export async function getTelegramStatus(
   const accounts = await env.DB.prepare(
     `SELECT a.id, a.user_id, u.name AS user_name, u.email AS user_email,
             a.telegram_user_id, a.chat_id, a.username, a.first_name,
-            a.status, a.paired_at, a.last_message_at
+            a.status, a.response_mode, a.paired_at, a.last_message_at
      FROM telegram_accounts a JOIN users u ON u.id = a.user_id
      ORDER BY a.paired_at DESC LIMIT 20`,
   ).all<Record<string, unknown>>();
@@ -530,7 +608,7 @@ export async function registerTelegramWebhook(
   env: Env,
   origin: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ url: string; webhook: Record<string, unknown> | null }> {
+): Promise<{ url: string; webhook: Record<string, unknown> | null; commandsRegistered: boolean }> {
   let parsed: URL;
   try {
     parsed = new URL(origin);
@@ -555,6 +633,16 @@ export async function registerTelegramWebhook(
     // Webhook registration is still valid if identity lookup is temporarily unavailable.
   }
 
+  let commandsRegistered = false;
+  try {
+    commandsRegistered = await setMyCommands(env, fetchImpl);
+    if (commandsRegistered) {
+      await writeSetting(env, "telegram_commands_registered_at", nowIso());
+    }
+  } catch {
+    commandsRegistered = false;
+  }
+
   let webhook: Record<string, unknown> | null = null;
   try {
     webhook = sanitizeWebhook(await getWebhookInfo(env, fetchImpl), url);
@@ -562,7 +650,7 @@ export async function registerTelegramWebhook(
     webhook = null;
   }
 
-  return { url, webhook };
+  return { url, webhook, commandsRegistered };
 }
 
 export async function createPairingCode(
@@ -606,67 +694,103 @@ export async function revokeTelegramLink(env: Env, userId: string): Promise<numb
   return Number(result.meta.changes ?? 0);
 }
 
+export async function setTelegramResponseMode(
+  env: Env,
+  userId: string,
+  mode: ResponseMode,
+): Promise<number> {
+  await setUserResponseMode(env, userId, mode);
+  const result = await env.DB.prepare(
+    `UPDATE telegram_accounts SET response_mode = ?, updated_at = ?
+     WHERE user_id = ? AND status = 'active'`,
+  )
+    .bind(mode, nowIso(), userId)
+    .run();
+  return Number(result.meta.changes ?? 0);
+}
+
+function modeLine(mode: ResponseMode): string {
+  const visual = modeVisual(mode);
+  return `${visual.icon} Mod: <b>${escapeHtml(visual.label)}</b>`;
+}
+
+function renderMode(mode: ResponseMode): string {
+  const visual = modeVisual(mode);
+  return [
+    `${visual.icon} <b>Mod Jawapan: ${escapeHtml(visual.label)}</b>`,
+    escapeHtml(MODE_DESCRIPTIONS[mode]),
+    "",
+    "<b>Tukar mod</b>",
+    "/human — mesra dan ringkas",
+    "/simple — sangat mudah, 3–5 poin",
+    "/deep_thinking — analisis terperinci",
+    "",
+    "<i>Mod disimpan untuk akaun Telegram ini.</i>",
+  ].join("\n");
+}
+
 function pairingInstructions(botUsername: string | null): string {
   const handle = botUsername ? `@${botUsername}` : "bot ini";
   return [
-    "NAGASARIBU AI WORKFORCE",
+    "🔐 <b>Pasangan diperlukan</b>",
     "",
     "Akaun Telegram ini belum dipasangkan dengan pentadbir.",
     "",
-    "Cara memasang:",
     "1. Log masuk ke Pusat Kawalan Operasi.",
     "2. Buka panel Telegram dan jana kod pasangan (sah 10 minit).",
-    `3. Hantar di sini: /pair KOD`,
+    "3. Hantar di sini: <code>/pair KOD</code>",
     "",
-    `Tiada akses diberikan secara automatik. Bot: ${handle}`,
+    `Tiada akses diberikan secara automatik. Bot: ${escapeHtml(handle)}`,
   ].join("\n");
 }
 
-function welcomeMessage(name: string): string {
+function welcomeMessage(name: string, mode: ResponseMode): string {
   return [
-    `Selamat datang, ${name}.`,
+    `🤖 <b>SARA sedia membantu, ${escapeHtml(name)}.</b>`,
+    modeLine(mode),
     "",
-    "SARA sedia menerima arahan operasi.",
+    "Hantar tugasan biasa atau pilih arahan pantas:",
+    "/status · /tasks · /agents · /prospects · /report",
+    "/human · /simple · /deep_thinking · /mode",
     "",
-    "Arahan tersedia:",
+    "🔐 Tindakan luaran memerlukan pengesahan melalui /confirm.",
+  ].join("\n");
+}
+
+function helpMessage(mode: ResponseMode): string {
+  const lines = [
+    "🤖 <b>Panduan SARA</b>",
+    modeLine(mode),
+    "",
+    "<b>Mod jawapan</b>",
+    "/human — mesra dan ringkas",
+    "/simple — 3–5 poin mudah",
+    "/deep_thinking — analisis terperinci",
+    "/mode — lihat mod semasa",
+    "",
+    "<b>Operasi</b>",
     "/status — ringkasan operasi",
     "/tasks — tugasan terkini",
-    "/agents — status ejen AI",
-    "/prospects — ringkasan prospek",
-    "/report — laporan penuh",
-    "/help — bantuan",
+    "/task &lt;ref&gt; — butiran penuh",
+    "/agents — ejen AI",
+    "/prospects — prospek",
+    "/report — ringkasan laporan",
+    "/report full — laporan terperinci",
     "",
-    "Anda juga boleh menghantar tugasan bahasa semula jadi.",
-    "Tindakan luaran memerlukan pengesahan eksplisit melalui /confirm ID.",
-  ].join("\n");
-}
-
-function helpMessage(name: string): string {
-  return [
-    `Bantuan SARA untuk ${name}`,
-    "",
-    "/status — ringkasan operasi",
-    "/tasks — 8 tugasan terkini",
-    "/agents — ejen dan beban tugas",
-    "/prospects — ringkasan prospek",
-    "/report — laporan operasi penuh",
-    "/confirm ID — sahkan tindakan luaran untuk tugasan",
-    "",
-    "Contoh arahan biasa:",
-    "• Sediakan ringkasan operasi minggu ini",
-    "• Analisis kos projek ini",
-    "• Draf strategi kempen untuk bulan depan",
-    "",
-    "Arahan luaran seperti menghantar e-mel, menerbitkan kandungan atau pembayaran",
-    "tidak akan dijalankan tanpa pengesahan eksplisit.",
-  ].join("\n");
+    "<b>Kelulusan</b>",
+    "/confirm &lt;ref&gt; — sahkan tindakan luaran",
+  ];
+  if (mode !== "simple") {
+    lines.push("", "Alias: /deep dan /deep-thinking = /deep_thinking.");
+  }
+  return lines.join("\n");
 }
 
 function truncate(value: unknown, max = MAX_TASK_TEXT): string {
   return String(value ?? "").replace(/\r\n/g, "\n").trim().slice(0, max);
 }
 
-async function formatStatus(env: Env): Promise<string> {
+async function formatStatus(env: Env, mode: ResponseMode): Promise<string> {
   const [tasks, agents, leads, prospects, approvals] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(*) AS total,
@@ -696,24 +820,67 @@ async function formatStatus(env: Env): Promise<string> {
 
   const ai = getProviderStatus(env);
   const backup = getMetaStatus(env);
+  const active = Number(tasks?.active ?? 0);
+  const completed = Number(tasks?.completed ?? 0);
+  const failed = Number(tasks?.failed ?? 0);
+  const blocked = Number(tasks?.blocked ?? 0);
+  const agentsActive = Number(agents?.active ?? 0);
+  const agentsTotal = Number(agents?.total ?? 0);
+  const newProspects = Number(prospects?.count ?? 0);
+  const approvalsPending = Number(approvals?.count ?? 0);
+  const summary = `${active} tugasan aktif dan ${approvalsPending} kelulusan menunggu perhatian.`;
 
-  return [
-    "📊 STATUS OPERASI",
+  const lines = [
+    "📊 <b>Status Operasi</b>",
+    escapeHtml(summary),
     "",
-    `Tugas: ${Number(tasks?.active ?? 0)} aktif · ${Number(tasks?.completed ?? 0)} selesai · ${Number(tasks?.failed ?? 0)} gagal · ${Number(tasks?.blocked ?? 0)} disekat`,
-    `Jumlah tugas: ${Number(tasks?.total ?? 0)}`,
-    `Ejen: ${Number(agents?.active ?? 0)} aktif / ${Number(agents?.total ?? 0)} berdaftar`,
-    `Prospek baharu: ${Number(prospects?.count ?? 0)}`,
-    `CRM: ${Number(leads?.total ?? 0)} prospek · ${Number(leads?.new ?? 0)} baharu · ${Number(leads?.qualified ?? 0)} layak`,
-    `Kelulusan menunggu: ${Number(approvals?.count ?? 0)}`,
-    "",
-    `AI: DeepSeek ${ai.mode.toUpperCase()}`,
-    `Backup: Muse Spark ${backup.available ? "tersedia" : "tidak tersedia"}`,
-    `Telegram: ${telegramConfigured(env) ? "dikonfigurasikan" : "belum dikonfigurasikan"}`,
-  ].join("\n");
+  ];
+
+  if (mode === "deep_thinking") {
+    lines.push(
+      "<b>Tugas</b>",
+      `• Jumlah: ${Number(tasks?.total ?? 0)}`,
+      `• Aktif: ${active}`,
+      `• Selesai: ${completed}`,
+      `• Gagal: ${failed}`,
+      `• Disekat: ${blocked}`,
+      "",
+      "<b>Ejen, CRM &amp; Prospek</b>",
+      `• Ejen aktif: ${agentsActive}/${agentsTotal}`,
+      `• Prospek baharu: ${newProspects}`,
+      `• CRM: ${Number(leads?.total ?? 0)} prospek, ${Number(leads?.new ?? 0)} baharu, ${Number(leads?.qualified ?? 0)} layak`,
+      `• Kelulusan menunggu: ${approvalsPending}`,
+      "",
+      "<b>AI</b>",
+      `• DeepSeek: ${ai.mode.toUpperCase()} (${escapeHtml(ai.model)})`,
+      `• Muse Spark: ${backup.available ? "tersedia" : "tidak tersedia"} (${escapeHtml(backup.model)})`,
+      `• Telegram: ${telegramConfigured(env) ? "dikonfigurasikan" : "belum dikonfigurasikan"}`,
+    );
+  } else {
+    const bullets =
+      mode === "simple"
+        ? [
+            `⏳ Tugas aktif: ${active}`,
+            `🔐 Kelulusan: ${approvalsPending}`,
+            `🎯 Prospek baharu: ${newProspects}`,
+            `🤖 Ejen aktif: ${agentsActive}`,
+          ]
+        : [
+            `⏳ Tugas aktif: ${active}`,
+            `✅ Selesai: ${completed}`,
+            `⚠️ Gagal/disekat: ${failed + blocked}`,
+            `🤖 Ejen aktif: ${agentsActive}/${agentsTotal}`,
+            `🎯 Prospek baharu: ${newProspects}`,
+            `🔐 Kelulusan menunggu: ${approvalsPending}`,
+          ];
+    lines.push(...bullets, "", `🤖 AI: DeepSeek ${ai.mode.toUpperCase()}`);
+  }
+
+  lines.push("", "➡️ /report untuk laporan penuh.");
+  return lines.join("\n");
 }
 
-async function formatTasks(env: Env): Promise<string> {
+async function formatTasks(env: Env, mode: ResponseMode): Promise<string> {
   const result = await env.DB.prepare(
     `SELECT t.id, t.title, t.status, t.execution_state, t.priority, t.created_at,
             a.name AS agent_name
@@ -722,18 +889,31 @@ async function formatTasks(env: Env): Promise<string> {
   ).all<Record<string, unknown>>();
 
   if (!result.results.length) {
-    return "📋 TUGASAN\n\nBelum ada tugasan dalam sistem.";
+    return "📊 <b>Tugasan</b>\n\nBelum ada tugasan dalam sistem.";
   }
 
-  const lines = result.results.map((task, index) => {
+  const Limit = mode === "simple" ? 3 : mode === "human" ? 5 : 8;
+  const tasks = result.results.slice(0, Limit);
+  const lines = [
+    "📊 <b>Tugasan Terkini</b>",
+    `${result.results.length} tugasan terkini dipaparkan.`,
+    "",
+  ];
+  for (const task of tasks) {
     const state = String(task.execution_state ?? task.status ?? "pending");
-    return `${index + 1}. [${state}] ${String(task.title ?? "").slice(0, 120)}\n   ${String(task.agent_name ?? "SARA (auto)")} · ${String(task.priority ?? "normal")}`;
-  });
-
-  return ["📋 TUGASAN TERKINI", "", ...lines].join("\n");
+    const visual = statusVisual(state);
+    const ref = taskRef(String(task.id ?? ""));
+    const agent = String(task.agent_name ?? "SARA (auto)");
+    lines.push(
+      `${visual.icon} <b>${escapeHtml(String(task.title ?? "").slice(0, 120))}</b>`,
+      `${escapeHtml(agent)} · ${escapeHtml(visual.label)} · <code>${escapeHtml(ref)}</code>`,
+    );
+  }
+  lines.push("", `➡️ /task <code>${escapeHtml(taskRef(String(tasks[0]?.id ?? "")))}</code> untuk butiran penuh.`);
+  return lines.join("\n");
 }
 
-async function formatAgents(env: Env): Promise<string> {
+async function formatAgents(env: Env, mode: ResponseMode): Promise<string> {
   const result = await env.DB.prepare(
     `SELECT a.name, a.kind, a.status,
             COALESCE((SELECT COUNT(*) FROM tasks t
@@ -742,16 +922,29 @@ async function formatAgents(env: Env): Promise<string> {
      FROM agent_registry a ORDER BY a.status ASC, a.name ASC LIMIT 20`,
   ).all<Record<string, unknown>>();
 
-  if (!result.results.length) return "🤖 EJEN AI\n\nBelum ada ejen berdaftar.";
+  if (!result.results.length) return "🤖 <b>Ejen AI</b>\n\nBelum ada ejen berdaftar.";
 
-  const lines = result.results.map(
-    (agent) =>
-      `• ${String(agent.name ?? "")} (${String(agent.kind ?? "general")}) — ${String(agent.status ?? "")}, ${Number(agent.active_tasks ?? 0)} tugas aktif`,
-  );
-  return ["🤖 EJEN AI", "", ...lines].join("\n");
+  const active = result.results.filter((agent) => agent.status === "active");
+  const selected = mode === "simple" ? active.slice(0, 3) : mode === "human" ? active.slice(0, 6) : result.results;
+  const lines = [
+    "🤖 <b>Ejen AI</b>",
+    `${active.length} ejen aktif daripada ${result.results.length} berdaftar.`,
+    "",
+  ];
+  for (const agent of selected) {
+    const name = String(agent.name ?? "");
+    const status = String(agent.status ?? "");
+    const activeTasks = Number(agent.active_tasks ?? 0);
+    const kind = String(agent.kind ?? "general");
+    lines.push(
+      `${agentVisual(name)} <b>${escapeHtml(name)}</b> · ${escapeHtml(status)} · ${activeTasks} tugas aktif${mode === "deep_thinking" ? ` · ${escapeHtml(kind)}` : ""}`,
+    );
+  }
+  lines.push("", "➡️ /tasks untuk senarai tugasan.");
+  return lines.join("\n");
 }
 
-async function formatProspects(env: Env): Promise<string> {
+async function formatProspects(env: Env, mode: ResponseMode): Promise<string> {
   const [byStatus, latest] = await Promise.all([
     env.DB.prepare(
       "SELECT status, COUNT(*) AS count FROM prospect_candidates GROUP BY status ORDER BY status",
@@ -768,22 +961,27 @@ async function formatProspects(env: Env): Promise<string> {
   }
 
   const lines = [
-    "🔎 PROSPEK",
+    "🎯 <b>Prospek</b>",
+    `${counts.new} prospek baharu menunggu semakan.`,
     "",
-    `Baharu: ${counts.new} · Diimport: ${counts.imported} · Ditolak: ${counts.rejected}`,
+    `• Baharu: ${counts.new}`,
+    `• Diimport: ${counts.imported}`,
+    `• Ditolak: ${counts.rejected}`,
   ];
   if (latest.results.length) {
-    lines.push("", "Calon terkini:");
-    for (const row of latest.results) {
+    const limit = mode === "simple" ? 2 : mode === "human" ? 3 : 5;
+    lines.push("", "<b>Calon terkini</b>");
+    for (const row of latest.results.slice(0, limit)) {
       lines.push(
-        `• ${String(row.company_name ?? "").slice(0, 80)} — skor ${Number(row.qualification_score ?? 0)}/100 (${String(row.status ?? "")})`,
+        `• ${escapeHtml(String(row.company_name ?? "").slice(0, 80))} — skor ${Number(row.qualification_score ?? 0)}/100 (${escapeHtml(String(row.status ?? ""))})`,
       );
     }
   }
+  lines.push("", "➡️ /report untuk ringkasan operasi.");
   return lines.join("\n");
 }
 
-async function formatReport(env: Env): Promise<string> {
+async function formatReport(env: Env, mode: ResponseMode): Promise<string> {
   const [tasks, agents, leads, approvals, execution, activity] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(*) AS total,
@@ -828,30 +1026,176 @@ async function formatReport(env: Env): Promise<string> {
   const ai = getProviderStatus(env);
   const backup = getMetaStatus(env);
   const telegram = await getTelegramSummary(env);
+  const active = Number(tasks?.active ?? 0);
+  const completedTasks = Number(tasks?.completed ?? 0);
+  const failedTasks = Number(tasks?.failed ?? 0);
+  const blockedTasks = Number(tasks?.blocked ?? 0);
+  const pendingApprovals = Number(approvals?.pending ?? 0);
+  const summary = `${completedTasks} tugasan selesai, ${failedTasks} gagal dan ${pendingApprovals} kelulusan menunggu.`;
 
   const lines = [
-    "📈 LAPORAN OPERASI",
+    "📊 <b>Laporan Operasi</b>",
+    escapeHtml(summary),
     "",
-    `Tugas: ${Number(tasks?.total ?? 0)} jumlah · ${Number(tasks?.active ?? 0)} aktif · ${Number(tasks?.completed ?? 0)} selesai · ${Number(tasks?.failed ?? 0)} gagal · ${Number(tasks?.blocked ?? 0)} disekat`,
-    `Pelaksanaan: ${Number(execution?.started ?? 0)} mula · ${Number(execution?.completed ?? 0)} selesai · ${Number(execution?.failed ?? 0)} gagal · ${Number(execution?.mock ?? 0)} mock · ${Number(execution?.fallbacks ?? 0)} fallback`,
-    `Ejen: ${Number(agents?.active ?? 0)} aktif / ${Number(agents?.total ?? 0)}`,
-    `CRM: ${Number(leads?.total ?? 0)} prospek · ${Number(leads?.new ?? 0)} baharu · ${Number(leads?.qualified ?? 0)} layak`,
-    `Kelulusan: ${Number(approvals?.pending ?? 0)} menunggu / ${Number(approvals?.total ?? 0)} jumlah`,
-    "",
-    `AI utama: DeepSeek ${ai.mode.toUpperCase()} (${ai.model})`,
-    `Backup: Muse Spark ${backup.available ? "tersedia" : "tidak tersedia"} (${backup.model})`,
-    `Telegram: ${telegram.activeLinks} akaun aktif · ${telegram.lastUpdateAt ? `update terakhir ${telegram.lastUpdateAt}` : "belum ada update"}`,
   ];
 
+  if (mode === "deep_thinking") {
+    lines.push(
+      "<b>Tugas &amp; pelaksanaan</b>",
+      `• Jumlah: ${Number(tasks?.total ?? 0)}`,
+      `• Aktif: ${active}`,
+      `• Selesai: ${completedTasks}`,
+      `• Gagal: ${failedTasks}`,
+      `• Disekat: ${blockedTasks}`,
+      `• Pelaksanaan: ${Number(execution?.started ?? 0)} mula, ${Number(execution?.completed ?? 0)} selesai, ${Number(execution?.failed ?? 0)} gagal, ${Number(execution?.mock ?? 0)} mock, ${Number(execution?.fallbacks ?? 0)} fallback`,
+      "",
+      "<b>Ejen &amp; CRM</b>",
+      `• Ejen aktif: ${Number(agents?.active ?? 0)}/${Number(agents?.total ?? 0)}`,
+      `• CRM: ${Number(leads?.total ?? 0)} prospek, ${Number(leads?.new ?? 0)} baharu, ${Number(leads?.qualified ?? 0)} layak`,
+      `• Kelulusan: ${pendingApprovals} menunggu / ${Number(approvals?.total ?? 0)} jumlah`,
+      "",
+      "<b>AI &amp; Telegram</b>",
+      `• DeepSeek: ${ai.mode.toUpperCase()} (${escapeHtml(ai.model)})`,
+      `• Muse Spark: ${backup.available ? "tersedia" : "tidak tersedia"} (${escapeHtml(backup.model)})`,
+      `• Telegram: ${telegram.activeLinks} akaun aktif, mod ${RESPONSE_MODES.map((item) => `${MODE_LABELS[item]} ${telegram.responseModes[item]}`).join(" · ")}`,
+    );
+  } else {
+    lines.push(
+      `⏳ Tugas aktif: ${active}`,
+      `✅ Selesai: ${completedTasks}`,
+      `❌ Gagal: ${failedTasks}`,
+      `⚠️ Disekat: ${blockedTasks}`,
+      `🔐 Kelulusan menunggu: ${pendingApprovals}`,
+      `🤖 Ejen aktif: ${Number(agents?.active ?? 0)}/${Number(agents?.total ?? 0)}`,
+      `🎯 Prospek baharu: ${Number(leads?.new ?? 0)}`,
+      `🤖 AI: DeepSeek ${ai.mode.toUpperCase()}`,
+    );
+  }
+
   if (activity.results.length) {
-    lines.push("", "Aktiviti terkini:");
-    for (const row of activity.results) {
+    lines.push("", "<b>Aktiviti terkini</b>");
+    for (const row of activity.results.slice(0, mode === "simple" ? 3 : 5)) {
       lines.push(
-        `• ${String(row.event_type ?? "")}: ${String(row.message ?? "").slice(0, 110)}`,
+        `• ${escapeHtml(String(row.event_type ?? ""))}: ${escapeHtml(String(row.message ?? "").slice(0, 120))}`,
       );
     }
   }
 
+  lines.push("", "➡️ /status untuk ringkasan pantas.");
+  return lines.join("\n");
+}
+
+async function resolveTaskId(env: Env, raw: string): Promise<string | null> {
+  const ref = String(raw ?? "").trim().replace(/^#/, "");
+  if (!/^[a-f0-9-]{1,36}$/i.test(ref)) return null;
+  if (ref.length >= 36) {
+    const row = await env.DB.prepare("SELECT id FROM tasks WHERE id = ?").bind(ref).first<{ id: string }>();
+    return row?.id ?? null;
+  }
+  const result = await env.DB.prepare(
+    "SELECT id FROM tasks WHERE id LIKE ? ORDER BY created_at DESC LIMIT 2",
+  )
+    .bind(`${ref}%`)
+    .all<{ id: string }>();
+  return result.results.length === 1 ? result.results[0].id : null;
+}
+
+async function formatTaskDetail(env: Env, taskId: string, mode: ResponseMode): Promise<string> {
+  const task = await env.DB.prepare(
+    `SELECT t.id, t.title, t.description, t.status, t.execution_state, t.priority, t.metadata,
+            t.result, t.last_error, t.last_execution_at, t.execution_mode, t.execution_count,
+            t.provider, t.provider_model, t.created_at, t.updated_at, t.completed_at,
+            a.name AS agent_name, u.name AS assigned_user_name, c.name AS created_by_name,
+            (SELECT ap.status FROM approvals ap
+             WHERE ap.entity_type = 'task' AND ap.entity_id = t.id
+             ORDER BY ap.created_at DESC LIMIT 1) AS approval_status,
+            (SELECT ap.description FROM approvals ap
+             WHERE ap.entity_type = 'task' AND ap.entity_id = t.id
+             ORDER BY ap.created_at DESC LIMIT 1) AS approval_description
+     FROM tasks t
+     LEFT JOIN agent_registry a ON a.id = t.assigned_agent_id
+     LEFT JOIN users u ON u.id = t.assigned_user_id
+     LEFT JOIN users c ON c.id = t.created_by
+     WHERE t.id = ?`,
+  )
+    .bind(taskId)
+    .first<Record<string, unknown>>();
+  if (!task) return "❌ <b>Tugasan tidak dijumpai.</b>";
+
+  const events = await env.DB.prepare(
+    `SELECT event_type, message, created_at FROM task_events
+     WHERE task_id = ? ORDER BY created_at DESC LIMIT 5`,
+  )
+    .bind(taskId)
+    .all<Record<string, unknown>>();
+
+  let metadata: Record<string, unknown> = {};
+  try {
+    metadata = JSON.parse(String(task.metadata ?? "{}")) as Record<string, unknown>;
+  } catch {
+    metadata = {};
+  }
+  const state = String(task.execution_state ?? task.status ?? "pending");
+  const visual = statusVisual(state);
+  const ref = taskRef(taskId);
+  const title = String(task.title ?? "Tugasan");
+  const resultText = String(task.result ?? "").trim();
+  const errorText = String(task.last_error ?? "").trim();
+  const description = String(task.description ?? "").trim();
+  const summary =
+    extractSummary(resultText) ||
+    extractSummary(description) ||
+    extractSummary(errorText) ||
+    "Butiran tugasan dipaparkan di bawah.";
+  const agentName = String(task.agent_name ?? task.assigned_user_name ?? "SARA (auto)");
+  const modeValue = normalizeResponseMode(metadata.responseMode ?? mode);
+  const lines = [
+    `${visual.icon} <b>${escapeHtml(title)}</b>`,
+    escapeHtml(summary),
+    "",
+    "<b>Butiran</b>",
+    `• Rujukan: <code>${escapeHtml(ref)}</code>`,
+    `• Status: ${escapeHtml(visual.label)}`,
+    `${agentVisual(agentName)} Ejen: ${escapeHtml(agentName)}`,
+    `• Mod jawapan: ${escapeHtml(MODE_LABELS[modeValue])}`,
+    `• Dicipta: ${escapeHtml(String(task.created_at ?? "").slice(0, 16).replace("T", " "))}`,
+  ];
+  if (task.provider) {
+    lines.push(
+      `• Penyedia: ${escapeHtml(String(task.provider))}${task.provider_model ? ` · ${escapeHtml(String(task.provider_model))}` : ""}`,
+    );
+  }
+  if (task.approval_status) {
+    lines.push(`• Kelulusan: ${escapeHtml(String(task.approval_status))}`);
+    if (task.approval_description) {
+      lines.push(`• Sebab: ${escapeHtml(String(task.approval_description).slice(0, 240))}`);
+    }
+  }
+  if (description) {
+    const max = mode === "deep_thinking" ? 3000 : 1200;
+    lines.push("", "<b>Keterangan</b>", escapeHtml(description.slice(0, max)));
+  }
+  if (resultText) {
+    lines.push("", "<b>Hasil</b>", formatAiContent(resultText));
+  }
+  if (errorText) {
+    lines.push("", "⚠️ <b>Sekatan / ralat</b>", escapeHtml(errorText));
+  }
+  if (events.results.length) {
+    lines.push("", "<b>Peristiwa terkini</b>");
+    for (const event of events.results) {
+      lines.push(
+        `• ${escapeHtml(String(event.event_type ?? ""))}: ${escapeHtml(String(event.message ?? "").slice(0, 160))}`,
+      );
+    }
+  }
+  const needsApproval = metadata.requiresApproval === true && task.approval_status !== "approved";
+  lines.push(
+    "",
+    needsApproval
+      ? `➡️ Hantar <code>/confirm ${escapeHtml(ref)}</code> untuk memberi pengesahan.`
+      : "➡️ /tasks untuk senarai tugasan.",
+  );
   return lines.join("\n");
 }
 
@@ -971,7 +1315,7 @@ function parseCommand(text: string): { command: string; args: string } | null {
 
 async function reply(env: Env, chatId: string | number, text: string, fetchImpl: typeof fetch): Promise<void> {
   try {
-    await sendMessage(env, { chatId, text }, fetchImpl);
+    await sendMessage(env, { chatId, text, parseMode: "HTML" }, fetchImpl);
   } catch (error) {
     console.error(
       "telegram_send_failed",
@@ -1082,8 +1426,8 @@ async function handlePairing(
 
   await env.DB.prepare(
     `INSERT INTO telegram_accounts
-       (id, user_id, telegram_user_id, chat_id, username, first_name, status, paired_at, last_message_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+       (id, user_id, telegram_user_id, chat_id, username, first_name, status, response_mode, paired_at, last_message_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', 'human', ?, ?)`,
   )
     .bind(
       newId(),
@@ -1105,9 +1449,9 @@ async function handlePairing(
     env,
     chatId,
     [
-      `✅ Pasangan berjaya untuk ${row.user_name}.`,
+      `✅ <b>Pasangan berjaya untuk ${escapeHtml(row.user_name)}.</b>`,
       "",
-      welcomeMessage(row.user_name),
+      welcomeMessage(row.user_name, DEFAULT_RESPONSE_MODE),
     ].join("\n"),
     fetchImpl,
   );
@@ -1120,11 +1464,13 @@ async function resolveAccount(
 ): Promise<TelegramAccountRow | null> {
   return env.DB.prepare(
     `SELECT a.id, a.user_id, a.telegram_user_id, a.chat_id, a.username, a.first_name,
-            a.status, a.paired_at, a.last_message_at,
+            a.status, COALESCE(p.response_mode, a.response_mode, 'human') AS response_mode,
+            a.paired_at, a.last_message_at,
             u.name AS user_name, u.status AS user_status, r.name AS role
      FROM telegram_accounts a
      JOIN users u ON u.id = a.user_id
      JOIN roles r ON r.id = u.role_id
+     LEFT JOIN user_ai_preferences p ON p.user_id = a.user_id
      WHERE a.telegram_user_id = ? AND a.chat_id = ? AND a.status = 'active'`,
   )
     .bind(telegramUserId, chatId)
@@ -1139,9 +1485,12 @@ async function handleConfirm(
   runner: TelegramTaskRunner,
   chatId: string,
   telegramUserId: string,
+  responseMode: ResponseMode,
 ): Promise<string> {
-  const taskId = args.trim().split(/\s+/)[0] ?? "";
-  if (!taskId) return "Sila hantar /confirm ID_TUGASAN.";
+  const ref = args.trim().split(/\s+/)[0] ?? "";
+  if (!ref) return "Sila hantar <code>/confirm REF</code>.";
+  const taskId = await resolveTaskId(env, ref);
+  if (!taskId) return "❌ <b>Tugasan tidak dijumpai atau rujukan tidak tepat.</b>";
 
   const task = await env.DB.prepare(
     `SELECT id, title, description, created_by, metadata FROM tasks WHERE id = ?`,
@@ -1156,7 +1505,7 @@ async function handleConfirm(
     }>();
 
   if (!task || task.created_by !== user.id) {
-    return "Tugasan tidak dijumpai atau bukan milik akaun ini.";
+    return "❌ <b>Tugasan tidak dijumpai atau bukan milik akaun ini.</b>";
   }
 
   let metadata: Record<string, unknown> = {};
@@ -1166,7 +1515,7 @@ async function handleConfirm(
     metadata = {};
   }
   if (metadata.source !== "telegram" || String(metadata.telegram_user_id ?? "") !== telegramUserId) {
-    return "Tugasan ini bukan tugasan Telegram anda. Pengesahan ditolak.";
+    return "🔐 <b>Pengesahan ditolak.</b> Tugasan ini bukan tugasan Telegram anda.";
   }
 
   const existing = await env.DB.prepare(
@@ -1217,12 +1566,13 @@ async function handleConfirm(
   }
 
   if (!limitStore(taskRate, `task:${user.id}`, 6, 10 * 60 * 1000)) {
-    return "Had pelaksanaan tugasan dicapai. Sila cuba selepas 10 minit.";
+    return "⚠️ Had pelaksanaan tugasan dicapai. Sila cuba selepas 10 minit.";
   }
 
   const result = await runner(env, request, user, {
     taskId,
     requiresApproval: true,
+    responseMode,
     telegramUserId,
     chatId,
   });
@@ -1233,7 +1583,7 @@ async function handleAuthorizedMessage(
   env: Env,
   request: Request,
   user: AuthUser,
-  message: TelegramMessage,
+  account: TelegramAccountRow,
   text: string,
   runner: TelegramTaskRunner,
   chatId: string,
@@ -1241,43 +1591,105 @@ async function handleAuthorizedMessage(
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const parsed = parseCommand(text);
+  const responseMode = normalizeResponseMode(account.response_mode);
+  const modeCommands: Record<string, ResponseMode> = {
+    human: "human",
+    simple: "simple",
+    deep_thinking: "deep_thinking",
+    deep: "deep_thinking",
+    "deep-thinking": "deep_thinking",
+  };
 
   if (parsed) {
+    const requestedMode = modeCommands[parsed.command];
+    if (requestedMode) {
+      await setUserResponseMode(env, user.id, requestedMode);
+      await audit(env, request, user.id, "telegram.mode.change", "telegram", account.id, {
+        from: responseMode,
+        to: requestedMode,
+      });
+      await reply(env, chatId, renderMode(requestedMode), fetchImpl);
+      return;
+    }
+
     switch (parsed.command) {
+      case "mode":
+        await reply(env, chatId, renderMode(responseMode), fetchImpl);
+        return;
       case "start":
-        await reply(env, chatId, welcomeMessage(user.name), fetchImpl);
+        await reply(env, chatId, welcomeMessage(user.name, responseMode), fetchImpl);
         return;
       case "help":
-        await reply(env, chatId, helpMessage(user.name), fetchImpl);
+        await reply(env, chatId, helpMessage(responseMode), fetchImpl);
         return;
       case "status":
-        await reply(env, chatId, await formatStatus(env), fetchImpl);
+        await reply(env, chatId, await formatStatus(env, responseMode), fetchImpl);
         return;
       case "tasks":
-        await reply(env, chatId, await formatTasks(env), fetchImpl);
+        await reply(env, chatId, await formatTasks(env, responseMode), fetchImpl);
         return;
       case "agents":
-        await reply(env, chatId, await formatAgents(env), fetchImpl);
+        await reply(env, chatId, await formatAgents(env, responseMode), fetchImpl);
         return;
       case "prospects":
-        await reply(env, chatId, await formatProspects(env), fetchImpl);
+        await reply(env, chatId, await formatProspects(env, responseMode), fetchImpl);
         return;
-      case "report":
-        await reply(env, chatId, await formatReport(env), fetchImpl);
+      case "report": {
+        const reportMode: ResponseMode =
+          parsed.args.trim().toLowerCase() === "full"
+            ? "deep_thinking"
+            : responseMode === "simple"
+              ? "simple"
+              : "human";
+        await reply(env, chatId, await formatReport(env, reportMode), fetchImpl);
         return;
+      }
+      case "task": {
+        const taskId = await resolveTaskId(env, parsed.args);
+        if (!taskId) {
+          await reply(
+            env,
+            chatId,
+            "❌ <b>Tugasan tidak dijumpai.</b>\n\nGunakan rujukan seperti <code>/task #a1b2c3d4</code>.",
+            fetchImpl,
+          );
+          return;
+        }
+        await reply(env, chatId, await formatTaskDetail(env, taskId, responseMode), fetchImpl);
+        return;
+      }
       case "confirm":
         await reply(
           env,
           chatId,
-          await handleConfirm(env, request, user, parsed.args, runner, chatId, telegramUserId),
+          await handleConfirm(
+            env,
+            request,
+            user,
+            parsed.args,
+            runner,
+            chatId,
+            telegramUserId,
+            responseMode,
+          ),
           fetchImpl,
         );
         return;
       case "pair":
-        await reply(env, chatId, "Akaun ini sudah dipasangkan. Jana kod baharu jika perlu menukar akaun.", fetchImpl);
+        await reply(
+          env,
+          chatId,
+          "🔐 Akaun ini sudah dipasangkan. Jana kod baharu di papan pemuka jika perlu menukar akaun.",
+          fetchImpl,
+        );
         return;
       default:
-        await reply(env, chatId, `Arahan /${parsed.command} tidak dikenali.\n\n${helpMessage(user.name)}`, fetchImpl);
+        await reply(
+          env,
+          chatId,
+          `❌ <b>Arahan /${escapeHtml(parsed.command)} tidak dikenali.</b>\n\n${helpMessage(responseMode)}`,
+          fetchImpl,
+        );
         return;
     }
   }
@@ -1292,7 +1704,12 @@ async function handleAuthorizedMessage(
     await audit(env, request, user.id, "telegram.task.rate_limited", "telegram", telegramUserId, {
       chatId,
     });
-    await reply(env, chatId, "Had pelaksanaan tugasan dicapai. Sila cuba selepas 10 minit.", fetchImpl);
+    await reply(
+      env,
+      chatId,
+      "⚠️ Had pelaksanaan tugasan dicapai. Sila cuba selepas 10 minit.",
+      fetchImpl,
+    );
     return;
   }
 
@@ -1300,6 +1717,7 @@ async function handleAuthorizedMessage(
   const result = await runner(env, request, user, {
     text: taskText,
     requiresApproval,
+    responseMode,
     telegramUserId,
     chatId,
   });
@@ -1418,16 +1836,6 @@ export async function handleTelegramWebhook(
     return json({ ok: true, rejected: true });
   }
 
-  if (parsed?.command === "start" || parsed?.command === "help") {
-    await reply(
-      env,
-      chatId,
-      parsed.command === "start" ? welcomeMessage(account.user_name) : helpMessage(account.user_name),
-      fetchImpl,
-    );
-    return json({ ok: true });
-  }
-
   const updatedAt = nowIso();
   await env.DB.prepare(
     `UPDATE telegram_accounts
@@ -1462,7 +1870,7 @@ export async function handleTelegramWebhook(
       env,
       request,
       user,
-      message,
+      account,
       text,
       runner,
       chatId,
@@ -1478,7 +1886,7 @@ export async function handleTelegramWebhook(
       chatId,
       code: error instanceof TelegramError ? error.code : "processing_failed",
     });
-    await reply(env, chatId, "Maaf, permintaan tidak dapat diproses. Sila cuba lagi.", fetchImpl);
+    await reply(env, chatId, "⚠️ Maaf, permintaan tidak dapat diproses. Sila cuba lagi.", fetchImpl);
   }
 
   return json({ ok: true });
@@ -1509,8 +1917,14 @@ export async function handleTelegramBootstrap(
     await auditTelegramApi(env, request, null, "telegram.webhook.register", {
       url: registered.url,
       source: "bootstrap",
+      commandsRegistered: registered.commandsRegistered,
     });
-    return json({ ok: true, url: registered.url, webhook: registered.webhook });
+    return json({
+      ok: true,
+      url: registered.url,
+      webhook: registered.webhook,
+      commandsRegistered: registered.commandsRegistered,
+    });
   } catch (error) {
     const telegramError =
       error instanceof TelegramError

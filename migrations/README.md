@@ -21,6 +21,8 @@ Cloudflare D1 (`nagasaribu-ai-workforce-db`) is the single primary production da
 - `0005_deepseek_prospect_analysis.sql`
 - `0006_provider_router.sql`
 - `0007_telegram_command_centre.sql`
+- `0008_telegram_response_mode.sql`
+- `0009_conversational_workspace.sql`
 
 ## Commands
 

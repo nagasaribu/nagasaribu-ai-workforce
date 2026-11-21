@@ -79,6 +79,9 @@ before(async () => {
       if (url.pathname.endsWith("/setWebhook")) {
         return outboundJson({ ok: true, result: true });
       }
+      if (url.pathname.endsWith("/setMyCommands")) {
+        return outboundJson({ ok: true, result: true });
+      }
       if (url.pathname.endsWith("/getWebhookInfo")) {
         return outboundJson({
           ok: true,
@@ -308,8 +311,8 @@ test("duplicate Telegram update_id values are ignored", async () => {
 test("/status and /tasks work for the paired administrator", async () => {
   const status = await sendUpdate(messageUpdate(2002, "/status"));
   assert.equal(status.status, 200);
-  assert.match(lastSent().text, /STATUS OPERASI/);
-  assert.match(lastSent().text, /Tugas:/);
+  assert.match(lastSent().text, /Status Operasi/);
+  assert.match(lastSent().text, /Tugas aktif/);
 
   const created = await call("/api/tasks", {
     method: "POST",
@@ -320,8 +323,67 @@ test("/status and /tasks work for the paired administrator", async () => {
 
   const tasks = await sendUpdate(messageUpdate(2003, "/tasks"));
   assert.equal(tasks.status, 200);
-  assert.match(lastSent().text, /TUGASAN TERKINI/);
+  assert.match(lastSent().text, /Tugasan Terkini/);
   assert.match(lastSent().text, /Tugas ujian Telegram/);
+});
+
+test("/report defaults to a concise summary and /report full is detailed", async () => {
+  const concise = await sendUpdate(messageUpdate(2030, "/report"));
+  assert.equal(concise.status, 200);
+  assert.match(lastSent().text, /Laporan Operasi/);
+  assert.doesNotMatch(lastSent().text, /Tugas &amp; pelaksanaan/);
+
+  const full = await sendUpdate(messageUpdate(2031, "/report full"));
+  assert.equal(full.status, 200);
+  assert.match(lastSent().text, /Laporan Operasi/);
+  assert.match(lastSent().text, /Tugas &amp; pelaksanaan/);
+});
+
+test("response modes persist between messages and are shown by /mode", async () => {
+  const initial = await sendUpdate(messageUpdate(2010, "/mode"));
+  assert.equal(initial.status, 200);
+  assert.match(lastSent().text, /Mod Jawapan: Human/);
+
+  let account = await dbFirst(
+    "SELECT response_mode FROM telegram_accounts WHERE telegram_user_id = '9001'",
+  );
+  assert.equal(account.response_mode, "human");
+
+  const simple = await sendUpdate(messageUpdate(2011, "/simple"));
+  assert.match(lastSent().text, /Mod Jawapan: Simple/);
+  account = await dbFirst("SELECT response_mode FROM telegram_accounts WHERE telegram_user_id = '9001'");
+  assert.equal(account.response_mode, "simple");
+  const preference = await dbFirst(
+    "SELECT response_mode FROM user_ai_preferences WHERE user_id = ?",
+    adminId,
+  );
+  assert.equal(preference.response_mode, "simple", "Telegram mode must use the shared user preference");
+
+  const mode = await sendUpdate(messageUpdate(2012, "/mode"));
+  assert.match(lastSent().text, /Mod Jawapan: Simple/);
+
+  const deep = await sendUpdate(messageUpdate(2013, "/deep"));
+  assert.match(lastSent().text, /Mod Jawapan: Deep Thinking/);
+  account = await dbFirst("SELECT response_mode FROM telegram_accounts WHERE telegram_user_id = '9001'");
+  assert.equal(account.response_mode, "deep_thinking");
+
+  const alias = await sendUpdate(messageUpdate(2014, "/deep-thinking"));
+  assert.match(lastSent().text, /Mod Jawapan: Deep Thinking/);
+
+  const dashboardMode = await call("/api/telegram/mode", {
+    method: "POST",
+    token: adminToken,
+    body: { mode: "deep_thinking" },
+  });
+  assert.equal(dashboardMode.status, 200);
+  assert.equal(dashboardMode.data.mode, "deep_thinking");
+  const dashboard = await call("/api/dashboard", { token: adminToken });
+  assert.equal(dashboard.status, 200);
+  assert.equal(dashboard.data.telegram.currentMode, "deep_thinking");
+  assert.equal(dashboard.data.telegram.responseModes.deep_thinking, 1);
+
+  const simpleAgain = await sendUpdate(messageUpdate(2015, "/simple"));
+  assert.match(lastSent().text, /Mod Jawapan: Simple/);
 });
 
 test("natural-language tasks are recorded and executed through SARA", async () => {
@@ -329,7 +391,8 @@ test("natural-language tasks are recorded and executed through SARA", async () =
     messageUpdate(2004, "Sediakan ringkasan operasi mingguan untuk pasukan."),
   );
   assert.equal(response.status, 200);
-  assert.match(lastSent().text, /ID:/);
+  assert.match(lastSent().text, /\/task #/);
+  assert.match(lastSent().text, /Poin utama/);
 
   const task = await dbFirst(
     "SELECT id, title, description, created_by, metadata, execution_count, execution_state FROM tasks WHERE title = ? ORDER BY created_at DESC LIMIT 1",
@@ -340,6 +403,7 @@ test("natural-language tasks are recorded and executed through SARA", async () =
   assert.equal(task.execution_count, 1);
   const metadata = JSON.parse(task.metadata);
   assert.equal(metadata.source, "telegram");
+  assert.equal(metadata.responseMode, "simple");
   assert.equal(metadata.telegram_user_id, "9001");
 
   const events = await dbAll("SELECT event_type FROM task_events WHERE task_id = ?", task.id);
@@ -351,6 +415,9 @@ test("natural-language tasks are recorded and executed through SARA", async () =
   const actions = logs.results.map((log) => log.action);
   assert.ok(actions.includes("telegram.task.create"));
   assert.ok(actions.includes("telegram.task.execute"));
+
+  const reset = await sendUpdate(messageUpdate(2009, "/human"));
+  assert.match(lastSent().text, /Mod Jawapan: Human/);
 });
 
 test("external actions require explicit confirmation before execution", async () => {
@@ -358,7 +425,7 @@ test("external actions require explicit confirmation before execution", async ()
     messageUpdate(2005, "Hantar e-mel tawaran kepada pelanggan baharu."),
   );
   assert.equal(response.status, 200);
-  assert.match(lastSent().text, /PENGESAHAN DIPERLUKAN/);
+  assert.match(lastSent().text, /Kelulusan Diperlukan/);
   assert.match(lastSent().text, /\/confirm/);
 
   const task = await dbFirst(
@@ -367,7 +434,10 @@ test("external actions require explicit confirmation before execution", async ()
   );
   assert.ok(task);
   assert.equal(task.execution_count, 0, "external task must not execute before confirmation");
-  assert.equal(task.execution_state, "pending");
+  assert.ok(
+    ["pending", "assigned"].includes(task.execution_state),
+    `external task must remain unexecuted, got ${task.execution_state}`,
+  );
   assert.equal(JSON.parse(task.metadata).requiresApproval, true);
 
   const approvalsBefore = await dbFirst(
@@ -378,7 +448,7 @@ test("external actions require explicit confirmation before execution", async ()
 
   const confirmed = await sendUpdate(messageUpdate(2006, `/confirm ${task.id}`));
   assert.equal(confirmed.status, 200);
-  assert.match(lastSent().text, /ID:/);
+  assert.match(lastSent().text, /\/task #/);
 
   const approval = await dbFirst(
     "SELECT status, decided_by FROM approvals WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -419,8 +489,8 @@ test("the complete analysis-only Telegram instruction executes without an approv
 
   const response = await sendUpdate(messageUpdate(2007, text));
   assert.equal(response.status, 200);
-  assert.doesNotMatch(lastSent().text, /PENGESAHAN DIPERLUKAN/);
-  assert.match(lastSent().text, /ID:/);
+  assert.doesNotMatch(lastSent().text, /Kelulusan Diperlukan/);
+  assert.match(lastSent().text, /\/task #/);
   assert.match(lastSent().text, /MOD MOCK|HASIL SARA/);
 
   const task = await dbFirst(
@@ -450,11 +520,50 @@ test("the complete analysis-only Telegram instruction executes without an approv
   assert.ok(!types.includes("approval_required"));
 });
 
+test("/task returns full task details by short reference and rejects unknown refs", async () => {
+  const task = await dbFirst(
+    "SELECT id FROM tasks WHERE description LIKE ? ORDER BY created_at DESC LIMIT 1",
+    "%Analisis dan sediakan laporan sahaja%",
+  );
+  assert.ok(task);
+
+  const detail = await sendUpdate(messageUpdate(2020, `/task ${task.id.slice(0, 8)}`));
+  assert.equal(detail.status, 200);
+  assert.match(lastSent().text, /Butiran/);
+  assert.match(lastSent().text, /Hasil/);
+  assert.match(lastSent().text, /Tugaskan Marketing AI/);
+  assert.ok(!lastSent().text.includes(task.id), "full UUID must not be dumped");
+
+  const missing = await sendUpdate(messageUpdate(2021, "/task deadbeef"));
+  assert.equal(missing.status, 200);
+  assert.match(lastSent().text, /Tugasan tidak dijumpai/);
+});
+
+test("AI and task content is escaped before Telegram HTML parsing", async () => {
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      title: "<b>evil</b> <script>alert(1)</script>",
+      description: "Ujian escaping <img src=x onerror=alert(1)>",
+    },
+  });
+  assert.equal(created.status, 201);
+
+  const detail = await sendUpdate(
+    messageUpdate(2022, `/task ${created.data.task.id.slice(0, 8)}`),
+  );
+  assert.equal(detail.status, 200);
+  assert.match(lastSent().text, /&lt;b&gt;evil&lt;\/b&gt;/);
+  assert.match(lastSent().text, /&lt;script&gt;/);
+  assert.doesNotMatch(lastSent().text, /<script>/);
+});
+
 test("genuine external actions assigned to Marketing AI still require approval", async () => {
   const text = "Tugaskan Marketing AI. Hantar WhatsApp kepada pelanggan.";
   const response = await sendUpdate(messageUpdate(2008, text));
   assert.equal(response.status, 200);
-  assert.match(lastSent().text, /PENGESAHAN DIPERLUKAN/);
+  assert.match(lastSent().text, /Kelulusan Diperlukan/);
   assert.match(lastSent().text, /\/confirm/);
 
   const task = await dbFirst(
@@ -510,6 +619,25 @@ test("webhook registration uses the worker HTTPS URL and verifies getWebhookInfo
   assert.equal(setCall.body.url, WEBHOOK_URL);
   assert.equal(setCall.body.secret_token, WEBHOOK_SECRET);
   assert.deepEqual(setCall.body.allowed_updates, ["message"]);
+
+  const commandsCall = outboundCalls.find((call) => call.pathname.endsWith("/setMyCommands"));
+  assert.ok(commandsCall, "registration must call setMyCommands");
+  const commandNames = commandsCall.body.commands.map((command) => command.command);
+  assert.deepEqual(commandNames, [
+    "start",
+    "help",
+    "human",
+    "simple",
+    "deep_thinking",
+    "mode",
+    "status",
+    "tasks",
+    "agents",
+    "prospects",
+    "report",
+    "confirm",
+  ]);
+  assert.equal(response.data.commandsRegistered, true);
 });
 
 test("the bootstrap registration endpoint requires its own secret", async () => {

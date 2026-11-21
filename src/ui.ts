@@ -597,6 +597,164 @@ export const consoleHtml = String.raw`<!doctype html>
     .table-actions { flex-direction: column; align-items: stretch; }
   }
 
+  /* ---------- Chat workspace ---------- */
+  .chat-shell {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 190px);
+    min-height: 560px;
+    max-height: 980px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .chat-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+    flex-wrap: wrap;
+  }
+  .chat-head-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .chat-head-mark {
+    width: 42px; height: 42px; border-radius: 14px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, #2563eb, #0d9488);
+    color: #fff; font-size: 18px; flex: 0 0 auto;
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.22);
+  }
+  .chat-head h2 { margin: 0; font-size: 16px; }
+  .chat-head p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+  .chat-mode-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chat-mode-btn {
+    appearance: none; border: 1px solid var(--line); background: var(--surface);
+    color: var(--muted); border-radius: 999px; padding: 7px 11px;
+    font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .chat-mode-btn:hover { background: var(--surface-2); color: var(--ink); }
+  .chat-mode-btn.active {
+    background: var(--navy); color: #fff; border-color: var(--navy);
+  }
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 22px 22px 12px;
+    display: flex; flex-direction: column; gap: 16px;
+    background:
+      radial-gradient(circle at 0% 0%, rgba(37, 99, 235, 0.035), transparent 34%),
+      linear-gradient(180deg, #fcfdff 0%, #f8fafc 100%);
+    scroll-behavior: smooth;
+  }
+  .chat-welcome {
+    margin: auto; max-width: 640px; text-align: center; padding: 26px 20px;
+  }
+  .chat-welcome .mark {
+    width: 56px; height: 56px; border-radius: 18px; margin: 0 auto 16px;
+    display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px;
+    background: linear-gradient(135deg, #2563eb, #0d9488);
+    box-shadow: 0 14px 34px rgba(37, 99, 235, 0.25);
+  }
+  .chat-welcome h2 { font-size: 23px; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .chat-welcome p { color: var(--muted); margin: 0 auto; max-width: 520px; font-size: 14px; }
+  .chat-starters {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px; margin-top: 22px; text-align: left;
+  }
+  .chat-starter {
+    appearance: none; border: 1px solid var(--line); background: #fff;
+    border-radius: 13px; padding: 11px 12px; cursor: pointer;
+    font: inherit; font-size: 12.5px; font-weight: 650; color: var(--ink-2);
+    display: flex; align-items: center; gap: 8px; text-align: left;
+    box-shadow: var(--shadow-sm);
+  }
+  .chat-starter:hover { border-color: #bfdbfe; background: #f8fbff; color: var(--navy); }
+  .chat-starter span { color: var(--teal); font-size: 15px; }
+  .chat-message { display: flex; gap: 10px; align-items: flex-start; max-width: 100%; }
+  .chat-message.user { flex-direction: row-reverse; }
+  .chat-avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: 10.5px; font-weight: 800; color: #fff;
+    background: linear-gradient(135deg, #2563eb, #0d9488);
+  }
+  .chat-message.user .chat-avatar { background: var(--navy-2); }
+  .chat-body { min-width: 0; max-width: min(78%, 760px); }
+  .chat-message.user .chat-body { display: flex; flex-direction: column; align-items: flex-end; }
+  .chat-bubble {
+    padding: 12px 15px; border-radius: 16px; white-space: pre-wrap;
+    overflow-wrap: anywhere; font-size: 13.8px; line-height: 1.6;
+    background: #fff; border: 1px solid var(--line); color: var(--ink);
+    box-shadow: var(--shadow-sm);
+  }
+  .chat-message.user .chat-bubble {
+    background: var(--navy); color: #f8fafc; border-color: var(--navy);
+    border-bottom-right-radius: 6px;
+  }
+  .chat-message.assistant .chat-bubble { border-bottom-left-radius: 6px; }
+  .chat-meta {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 6px; font-size: 10.5px; color: var(--muted);
+  }
+  .chat-meta .badge { font-size: 9.5px; padding: 3px 7px; }
+  .chat-task-btn {
+    appearance: none; border: 0; background: transparent; color: var(--accent);
+    font: inherit; font-size: 10.5px; font-weight: 700; cursor: pointer; padding: 0;
+  }
+  .chat-task-btn:hover { text-decoration: underline; }
+  .chat-loading {
+    display: inline-flex; align-items: center; gap: 8px; color: var(--muted);
+    font-size: 12.5px; padding: 11px 15px; background: #fff;
+    border: 1px solid var(--line); border-radius: 16px; border-bottom-left-radius: 6px;
+  }
+  .chat-dots { display: inline-flex; gap: 3px; }
+  .chat-dots i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--muted-2);
+    animation: chatDot 1.1s infinite ease-in-out;
+  }
+  .chat-dots i:nth-child(2) { animation-delay: 0.15s; }
+  .chat-dots i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes chatDot { 0%, 80%, 100% { opacity: 0.3; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+  .chat-composer {
+    border-top: 1px solid var(--line); background: #fff; padding: 12px 16px 14px;
+  }
+  .chat-form {
+    display: flex; align-items: flex-end; gap: 9px;
+    border: 1px solid var(--line-strong); border-radius: 15px;
+    padding: 8px 8px 8px 13px; background: #fff;
+    box-shadow: 0 6px 20px rgba(16, 24, 40, 0.05);
+  }
+  .chat-form:focus-within { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+  .chat-form textarea {
+    flex: 1; border: 0; outline: 0; resize: none; background: transparent;
+    font: inherit; font-size: 13.8px; line-height: 1.5; color: var(--ink);
+    min-height: 24px; max-height: 144px; padding: 4px 0;
+  }
+  .chat-form textarea::placeholder { color: var(--muted-2); }
+  .chat-send {
+    appearance: none; border: 0; border-radius: 11px; width: 38px; height: 38px;
+    display: grid; place-items: center; cursor: pointer; flex: 0 0 auto;
+    background: linear-gradient(135deg, #2563eb, #0d9488); color: #fff;
+    box-shadow: 0 6px 16px rgba(37, 99, 235, 0.28);
+  }
+  .chat-send:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+  .chat-send svg { width: 18px; height: 18px; }
+  .chat-hint { margin: 7px 2px 0; color: var(--muted-2); font-size: 10.5px; }
+  @media (max-width: 900px) {
+    .chat-shell { height: calc(100vh - 150px); min-height: 520px; border-radius: 18px; }
+    .chat-starters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .chat-body { max-width: 86%; }
+    .chat-head { padding: 13px 14px; }
+    .chat-messages { padding: 16px 14px 8px; }
+  }
+  @media (max-width: 560px) {
+    .chat-starters { grid-template-columns: 1fr; }
+    .chat-welcome h2 { font-size: 20px; }
+    .chat-body { max-width: 90%; }
+    .chat-composer { padding: 10px 11px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -659,7 +817,7 @@ export const consoleHtml = String.raw`<!doctype html>
         </button>
         <div>
           <span class="eyebrow">Pusat Kawalan Operasi</span>
-          <h1 id="page-title">Ringkasan</h1>
+          <h1 id="page-title">Sembang SARA</h1>
         </div>
       </div>
       <div class="status-strip" id="global-status" aria-live="polite">
@@ -784,7 +942,8 @@ export const consoleHtml = String.raw`<!doctype html>
     users: [],
     prospects: [],
     taskAgentFilter: null,
-    taskAgentName: ""
+    taskAgentName: "",
+    chat: { conversationId: null, messages: [], mode: "human", loading: false, starters: [] }
   };
 
   var ROLE_LABELS = { admin: "Pentadbir", manager: "Pengurus", agent: "Ejen", viewer: "Pemerhati" };
@@ -840,6 +999,7 @@ export const consoleHtml = String.raw`<!doctype html>
   };
   var ICONS = {
     dashboard: svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
+    chat: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/>'),
     tasks: svg('<rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/>'),
     agents: svg('<rect x="5" y="7" width="14" height="12" rx="3"/><path d="M12 3v4M8.5 12h.01M15.5 12h.01M9 19v2M15 19v2"/>'),
     prospects: svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/><path d="M8 11h6M11 8v6"/>'),
@@ -921,6 +1081,7 @@ export const consoleHtml = String.raw`<!doctype html>
   }
 
   var navMeta = {
+    chat: "Sembang SARA",
     dashboard: "Ringkasan",
     tasks: "Tugas",
     agents: "Ejen",
@@ -1045,7 +1206,7 @@ export const consoleHtml = String.raw`<!doctype html>
   }
 
   function buildNav() {
-    var items = [["dashboard", "Ringkasan"], ["tasks", "Tugas"], ["agents", "Ejen"]];
+    var items = [["chat", "Sembang SARA"], ["dashboard", "Ringkasan"], ["tasks", "Tugas"], ["agents", "Ejen"]];
     if (state.user.role === "admin" || state.user.role === "manager") {
       items.push(["prospects", "Cari Prospek"]);
     }
@@ -1086,7 +1247,7 @@ export const consoleHtml = String.raw`<!doctype html>
     $("user-avatar").textContent = initials(state.user.name);
     buildNav();
     loadGlobalStatus();
-    switchTab("dashboard");
+    switchTab("chat");
   }
 
   function switchTab(tab) {
@@ -1141,6 +1302,145 @@ export const consoleHtml = String.raw`<!doctype html>
 
   var loaders = {};
 
+  var CHAT_MODES = {
+    human: { icon: "💬", label: "Human" },
+    simple: { icon: "⚡", label: "Simple" },
+    deep_thinking: { icon: "🧠", label: "Deep Thinking" }
+  };
+
+  function chatStatusIcon(status) {
+    if (status === "completed") return "✅";
+    if (status === "failed") return "❌";
+    if (status === "blocked") return "⚠️";
+    if (status === "running" || status === "assigned" || status === "pending") return "⏳";
+    return "";
+  }
+
+  function chatModeBar(mode) {
+    return '<div class="chat-mode-bar">' + Object.keys(CHAT_MODES).map(function (key) {
+      var item = CHAT_MODES[key];
+      return '<button class="chat-mode-btn' + (key === mode ? " active" : "") + '" type="button" data-action="chat-mode" data-mode="' + esc(key) + '">' + item.icon + " " + esc(item.label) + "</button>";
+    }).join("") + "</div>";
+  }
+
+  function chatMessageHtml(message) {
+    var isUser = message.role === "user";
+    var content = esc(message.content || "");
+    var avatar = isUser ? initials(state.user && state.user.name ? state.user.name : "Dato") : "S";
+    var meta = [];
+    if (!isUser) {
+      if (message.agent_name) meta.push('<span class="badge teal"><span class="dot"></span>' + esc(message.agent_name) + "</span>");
+      if (message.provider) meta.push('<span class="badge slate">' + esc(message.provider) + (message.model ? " · " + esc(message.model) : "") + "</span>");
+      var icon = chatStatusIcon(message.execution_status);
+      if (icon) meta.push('<span class="badge ' + (message.execution_status === "completed" ? "green" : message.execution_status === "failed" ? "red" : "amber") + '">' + icon + " " + esc(String(message.execution_status || "").replace(/_/g, " ")) + "</span>");
+    }
+    meta.push("<span>" + esc(fmtDate(message.created_at)) + "</span>");
+    if (!isUser && message.task_id) {
+      meta.push('<button class="chat-task-btn" type="button" data-action="task-detail" data-id="' + esc(message.task_id) + '">Lihat tugas</button>');
+    }
+    return '<div class="chat-message ' + (isUser ? "user" : "assistant") + '">' +
+      '<div class="chat-avatar">' + esc(avatar) + "</div>" +
+      '<div class="chat-body"><div class="chat-bubble">' + content + "</div>" +
+      '<div class="chat-meta">' + meta.join("") + "</div></div></div>";
+  }
+
+  function chatEmptyHtml(data) {
+    var starters = data && Array.isArray(data.starters) && data.starters.length
+      ? data.starters
+      : [
+          { label: "Cari pelanggan", prompt: "Cari pelanggan baharu untuk perkhidmatan waterproofing di Selangor." },
+          { label: "Analisis QS", prompt: "Sediakan analisis kos awal untuk projek pembinaan dan waterproofing." },
+          { label: "Strategi pemasaran", prompt: "Sediakan strategi pemasaran 7 hari untuk perkhidmatan waterproofing." },
+          { label: "Analisis kewangan", prompt: "Sediakan analisis kewangan dan unjuran aliran tunai bulan ini." },
+          { label: "Sokongan teknikal", prompt: "Beri cadangan teknikal untuk automasi proses operasi syarikat." },
+          { label: "Creative Studio", prompt: "Sediakan brief kreatif untuk kempen media sosial syarikat." }
+        ];
+    return '<div class="chat-welcome"><div class="mark">S</div>' +
+      "<h2>Selamat datang, Dato.</h2>" +
+      "<p>Apa yang hendak kita selesaikan hari ini?</p>" +
+      '<div class="chat-starters">' + starters.map(function (starter) {
+        return '<button class="chat-starter" type="button" data-action="chat-starter" data-prompt="' + esc(starter.prompt) + '"><span>›</span>' + esc(starter.label) + "</button>";
+      }).join("") + "</div></div>";
+  }
+
+  function chatComposerHtml(loading) {
+    return '<div class="chat-composer"><form class="chat-form" id="chat-form">' +
+      '<textarea id="chat-input" name="message" rows="1" maxlength="5000" placeholder="Tulis arahan kepada SARA…" aria-label="Mesej kepada SARA"></textarea>' +
+      '<button class="chat-send" id="chat-send" type="submit" aria-label="Hantar mesej"' + (loading ? " disabled" : "") + '>' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>' +
+      "</button></form>" +
+      '<div class="chat-hint">Enter untuk hantar · Shift+Enter untuk baris baharu</div></div>';
+  }
+
+  function renderChat(data) {
+    var messages = (data && data.messages) || [];
+    var mode = (data && data.mode) || state.chat.mode || "human";
+    var loading = Boolean(state.chat.loading);
+    var body = messages.length
+      ? messages.map(chatMessageHtml).join("")
+      : chatEmptyHtml(data);
+    if (loading) {
+      body += '<div class="chat-message assistant"><div class="chat-avatar">S</div><div class="chat-body"><div class="chat-loading"><span class="chat-dots"><i></i><i></i><i></i></span> SARA sedang menganalisis dan melaksanakan tugasan…</div></div></div>';
+    }
+    $("view").innerHTML =
+      '<div class="chat-shell"><div class="chat-head">' +
+        '<div class="chat-head-left"><div class="chat-head-mark">S</div><div><h2>SARA</h2><p>Pembantu AI operasi NAGASARIBU</p></div></div>' +
+        chatModeBar(mode) +
+      "</div>" +
+      '<div class="chat-messages" id="chat-messages">' + body + "</div>" +
+      chatComposerHtml(loading) +
+      "</div>";
+    var container = $("chat-messages");
+    if (container) container.scrollTop = container.scrollHeight;
+    if (!loading) {
+      var input = $("chat-input");
+      if (input) input.focus();
+    }
+  }
+
+  loaders.chat = function () {
+    return api("/api/chat").then(function (data) {
+      state.chat.conversationId = data.conversation ? data.conversation.id : null;
+      state.chat.messages = data.messages || [];
+      state.chat.mode = data.mode || "human";
+      state.chat.starters = data.starters || [];
+      renderChat(data);
+    });
+  };
+
+  function sendChatMessage(text) {
+    var value = String(text || "").trim();
+    if (!value || state.chat.loading) return;
+    var input = $("chat-input");
+    state.chat.loading = true;
+    renderChat({ messages: state.chat.messages, mode: state.chat.mode, starters: state.chat.starters });
+    if (input) input.value = "";
+    var clientMessageId = window.crypto && window.crypto.randomUUID
+      ? window.crypto.randomUUID()
+      : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+    api("/api/chat", {
+      method: "POST",
+      body: {
+        message: value,
+        conversationId: state.chat.conversationId,
+        clientMessageId: clientMessageId
+      }
+    }).then(function (data) {
+      state.chat.loading = false;
+      state.chat.conversationId = data.conversation ? data.conversation.id : state.chat.conversationId;
+      state.chat.messages = data.messages || [];
+      state.chat.mode = data.mode || state.chat.mode;
+      state.chat.starters = data.starters || state.chat.starters;
+      renderChat(data);
+    }).catch(function (error) {
+      state.chat.loading = false;
+      renderChat({ messages: state.chat.messages, mode: state.chat.mode, starters: state.chat.starters });
+      var input = $("chat-input");
+      if (input && !input.value) input.value = value;
+      toast(error.message, true);
+    });
+  }
+
   loaders.dashboard = function () {
     var canLeads = ["admin", "manager", "agent"].indexOf(state.user.role) !== -1;
     var canProspects = ["admin", "manager"].indexOf(state.user.role) !== -1;
@@ -1166,6 +1466,10 @@ export const consoleHtml = String.raw`<!doctype html>
       var telegramReady = telegramConfigured && telegramLinked > 0;
       var telegramState = !telegramConfigured ? "BELUM DIKONFIGURASI" : telegramReady ? "TERHUBUNG" : "SIAP UNTUK PASANGAN";
       var telegramTone = !telegramConfigured ? "slate" : telegramReady ? "green" : "amber";
+      var TELEGRAM_MODES = { human: "💬 Human", simple: "⚡ Simple", deep_thinking: "🧠 Deep Thinking" };
+      var TELEGRAM_MODE_SHORT = { human: "Human", simple: "Simple", deep_thinking: "Deep" };
+      var currentTelegramMode = TELEGRAM_MODES[telegram.currentMode] ? telegram.currentMode : "human";
+      var telegramModeCounts = telegram.responseModes || {};
       var firstName = String(state.user.name || "").split(/\s+/)[0] || "SARA";
       var today = new Intl.DateTimeFormat("ms-MY", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
       var canWriteTasks = state.user.role !== "viewer";
@@ -1215,6 +1519,14 @@ export const consoleHtml = String.raw`<!doctype html>
       ].join("");
       var providerPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.bolt + ' Provider AI</h2><div class="status-strip">' + statusPill("Aktif: " + activeName, providers.active === "deepseek" ? "green" : providers.active === "meta" ? "violet" : "slate", null) + '</div></div><div class="panel-body"><div class="agent-grid compact">' + providerCards + '</div><div class="detail-grid" style="margin-top:16px"><div class="detail-item"><div class="label">Model Aktif</div><div class="value">' + esc(activeModel) + '</div></div><div class="detail-item"><div class="label">Jumlah Token</div><div class="value">' + esc(usage.totalTokens || 0) + '</div></div><div class="detail-item"><div class="label">Token Reasoning</div><div class="value">' + esc(usage.reasoningTokens || 0) + '</div></div><div class="detail-item"><div class="label">Fallback</div><div class="value">' + esc(usage.fallbackEvents || 0) + ' event</div></div><div class="detail-item"><div class="label">Ralat Penyedia</div><div class="value">' + esc(usage.providerErrors || 0) + '</div></div></div><div class="panel-sub" style="margin-top:12px">Fallback automatik hanya untuk timeout, ralat rangkaian, HTTP 429 dan HTTP 5xx. Ralat pengesahan tidak dicuba semula.</div></div></div>';
 
+      var telegramModeActions = state.user.role === "admin" && telegramLinked > 0
+        ? '<div class="card-actions">' + Object.keys(TELEGRAM_MODES).map(function (mode) {
+            return '<button class="btn btn-sm' + (mode === currentTelegramMode ? " btn-primary" : "") + '" type="button" data-action="telegram-mode" data-mode="' + esc(mode) + '">' + esc(TELEGRAM_MODES[mode]) + "</button>";
+          }).join("") + "</div>"
+        : "";
+      var telegramModeSummary = Object.keys(TELEGRAM_MODES).map(function (mode) {
+        return TELEGRAM_MODE_SHORT[mode] + " " + Number(telegramModeCounts[mode] || 0);
+      }).join(" · ");
       var telegramActions = state.user.role === "admin"
         ? '<div class="card-actions">' +
             '<button class="btn btn-sm btn-primary" type="button" data-action="telegram-pair">' + ICONS.telegram + ' Jana Kod Pasangan</button>' +
@@ -1225,12 +1537,16 @@ export const consoleHtml = String.raw`<!doctype html>
       var telegramPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.telegram + ' Telegram Command Centre</h2><div class="status-strip">' + statusPill(telegramState, telegramTone, null) + '</div></div><div class="panel-body">' +
         '<div class="detail-grid">' +
           '<div class="detail-item"><div class="label">Bot</div><div class="value">' + esc(telegram.botUsername ? "@" + telegram.botUsername : "Belum disahkan") + '</div></div>' +
+          '<div class="detail-item"><div class="label">Mod Jawapan</div><div class="value">' + esc(TELEGRAM_MODES[currentTelegramMode]) + '</div></div>' +
           '<div class="detail-item"><div class="label">Pautan Aktif</div><div class="value">' + esc(telegramLinked) + ' akaun</div></div>' +
           '<div class="detail-item"><div class="label">Webhook</div><div class="value">' + esc(telegram.webhookUrl ? "Terdaftar" : "Belum didaftarkan") + '</div></div>' +
+          '<div class="detail-item"><div class="label">Arahan Bot</div><div class="value">' + esc(telegram.commandsRegisteredAt ? "Terdaftar" : "Belum") + '</div></div>' +
           '<div class="detail-item"><div class="label">Kod Menunggu</div><div class="value">' + esc(telegram.pendingPairingCodes || 0) + '</div></div>' +
           '<div class="detail-item"><div class="label">Mesej Terakhir</div><div class="value">' + esc(telegram.lastMessageAt ? fmtDate(telegram.lastMessageAt) : "—") + '</div></div>' +
           '<div class="detail-item"><div class="label">Update Terakhir</div><div class="value">' + esc(telegram.lastUpdateAt ? fmtDate(telegram.lastUpdateAt) : "—") + '</div></div>' +
-        "</div>" + telegramActions +
+        "</div>" +
+        (telegramLinked > 0 ? '<div class="panel-sub" style="margin-top:12px"><strong>Taburan mod:</strong> ' + esc(telegramModeSummary) + "</div>" : "") +
+        telegramModeActions + telegramActions +
         '<div id="telegram-pairing" class="panel-sub" style="margin-top:12px"></div>' +
         '<div class="panel-sub" style="margin-top:12px">Pasangan hanya boleh dibuat melalui kod sekali guna yang dijana oleh pentadbir. Pengguna Telegram tidak diterima secara automatik, dan setiap update dideduplikasi menggunakan update_id.</div>' +
         "</div></div>";
@@ -1741,6 +2057,13 @@ export const consoleHtml = String.raw`<!doctype html>
 
     if (!state.user) return;
 
+    if (form.id === "chat-form") {
+      event.preventDefault();
+      var chatData = new FormData(form);
+      sendChatMessage(chatData.get("message"));
+      return;
+    }
+
     if (form.id === "task-form") {
       event.preventDefault();
       var taskData = new FormData(form);
@@ -1943,6 +2266,32 @@ export const consoleHtml = String.raw`<!doctype html>
     var target = event.target.closest("[data-action]");
     if (!target) return;
     var action = target.getAttribute("data-action");
+
+    if (action === "chat-mode") {
+      var requestedMode = target.getAttribute("data-mode");
+      if (!requestedMode || requestedMode === state.chat.mode) return;
+      target.disabled = true;
+      api("/api/chat/mode", { method: "POST", body: { mode: requestedMode } })
+        .then(function (data) {
+          state.chat.mode = data.mode || requestedMode;
+          renderChat({ messages: state.chat.messages, mode: state.chat.mode, starters: state.chat.starters });
+          toast("Mod jawapan dikemas kini.");
+        })
+        .catch(function (error) { toast(error.message, true); target.disabled = false; });
+      return;
+    }
+
+    if (action === "chat-starter") {
+      var prompt = target.getAttribute("data-prompt") || "";
+      var chatInput = $("chat-input");
+      if (chatInput) {
+        chatInput.value = prompt;
+        chatInput.focus();
+        chatInput.style.height = "auto";
+        chatInput.style.height = Math.min(144, chatInput.scrollHeight) + "px";
+      }
+      return;
+    }
 
     if (action === "nav") {
       var navTab = target.getAttribute("data-tab");
@@ -2155,6 +2504,18 @@ export const consoleHtml = String.raw`<!doctype html>
       return;
     }
 
+    if (action === "telegram-mode") {
+      var mode = target.getAttribute("data-mode");
+      target.disabled = true;
+      api("/api/telegram/mode", { method: "POST", body: { mode: mode } })
+        .then(function () {
+          toast("Mod jawapan Telegram dikemas kini.");
+          switchTab("dashboard");
+        })
+        .catch(function (error) { toast(error.message, true); target.disabled = false; });
+      return;
+    }
+
     if (action === "telegram-pair") {
       target.disabled = true;
       api("/api/telegram/pairing-code", { method: "POST", body: {} })
@@ -2178,7 +2539,7 @@ export const consoleHtml = String.raw`<!doctype html>
       api("/api/telegram/webhook/register", { method: "POST", body: {} })
         .then(function (data) {
           var webhook = data.webhook || {};
-          toast(webhook.matchesExpected ? "Webhook Telegram didaftarkan dan disahkan." : "Webhook didaftarkan. Semak status Telegram.");
+          toast(data.commandsRegistered ? "Webhook dan menu arahan Telegram didaftarkan." : (webhook.matchesExpected ? "Webhook Telegram didaftarkan dan disahkan." : "Webhook didaftarkan. Semak status Telegram."));
           switchTab("dashboard");
         })
         .catch(function (error) { toast(error.message, true); target.disabled = false; });
@@ -2193,6 +2554,21 @@ export const consoleHtml = String.raw`<!doctype html>
           switchTab("dashboard");
         }).catch(function (error) { toast(error.message, true); });
       return;
+    }
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.target && event.target.id === "chat-input" && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      var chatForm = $("chat-form");
+      if (chatForm && typeof chatForm.requestSubmit === "function") chatForm.requestSubmit();
+    }
+  });
+
+  document.addEventListener("input", function (event) {
+    if (event.target && event.target.id === "chat-input") {
+      event.target.style.height = "auto";
+      event.target.style.height = Math.min(144, event.target.scrollHeight) + "px";
     }
   });
 

@@ -1,5 +1,6 @@
 import type { Env } from "./types.ts";
 import { generateWithFallback, type RouterResult } from "./providers/router.ts";
+import { modeInstruction, normalizeResponseMode } from "./response-mode.ts";
 
 export interface AgentRecord {
   id: string;
@@ -112,6 +113,8 @@ export function buildAgentPrompt(
       JSON.stringify(toolOutput).slice(0, 5000),
     );
   }
+
+  lines.push("", modeInstruction(normalizeResponseMode(metadata.responseMode)));
 
   lines.push(
     "",

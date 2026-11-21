@@ -1,0 +1,100 @@
+# Phase 7 — Conversational Workspace V2
+
+## Web chat-first workspace
+
+After login, the default page is **Sembang SARA**. The page provides:
+
+- A central conversation panel with user and SARA message bubbles.
+- A fixed composer with Enter-to-send and Shift+Enter for a new line.
+- Loading and execution status indicators.
+- Starter actions for customer search, QS analysis, marketing, finance,
+  technical support and Creative Studio.
+- A persistent response-mode selector.
+- Conversation history loaded from D1 across reloads.
+- Links from assistant responses to the existing task detail dialog.
+
+The existing task, agent, prospect, approval, user and audit screens remain
+available as advanced management sections. Advanced task fields are not shown
+on the chat page.
+
+## Shared chat API
+
+Authenticated endpoints:
+
+- `GET /api/chat` — latest web conversation, messages, mode and starter actions.
+- `POST /api/chat` — send a message, execute the task pipeline and persist both
+  sides of the conversation.
+- `GET /api/chat/history` — web conversations and messages for a selected conversation.
+- `POST /api/chat/mode` — persist the shared response-mode preference.
+
+The endpoints use the existing session authentication, RBAC, same-origin checks,
+audit logs and rate limits.
+
+## Shared execution pipeline
+
+Web chat and Telegram both use `runChatExecution()`, which reuses:
+
+- existing task creation and state machine,
+- SARA agent selection and specialist auto-routing,
+- `executeTask()`,
+- DeepSeek primary / Muse Spark fallback routing,
+- approval gates and task/audit events.
+
+Agent selection uses explicit administrator instructions first, then keyword
+routing for QS, Marketing, Finance, Technical and Creative Studio, with SARA as
+the orchestrator fallback.
+
+`client_message_id` provides web-chat idempotency so duplicate submissions do not
+create or execute a second task. Telegram continues to use `update_id` deduplication.
+
+## Response modes
+
+Persisted in `user_ai_preferences.response_mode`:
+
+- `human` — default, natural and concise Bahasa Melayu.
+- `simple` — maximum 3–5 simple points.
+- `deep_thinking` — structured strategic analysis without revealing hidden
+  chain-of-thought.
+
+Telegram aliases `/deep` and `/deep-thinking` are supported. Web and Telegram share
+the same preference record. Telegram account rows are synchronized for backward
+compatibility.
+
+## Telegram V2
+
+- Modes: `/human`, `/simple`, `/deep_thinking`, `/deep`, `/deep-thinking`, `/mode`.
+- `/task <ref>` for full task details using short references.
+- `/report` returns a concise summary; `/report full` returns the detailed report.
+- Responses use safely escaped Telegram HTML, concise task summaries and one next action.
+- Long messages are split without breaking HTML tags.
+- The bot command menu is registered with `setMyCommands`.
+- Pairing, webhook authentication, update deduplication, approvals and audit logging
+  remain intact.
+
+## D1 migration
+
+`0009_conversational_workspace.sql` adds:
+
+- `user_ai_preferences`
+- `conversations`
+- `conversation_messages`
+
+It is additive and backfills preferences from existing Telegram accounts. The
+existing `0008_telegram_response_mode.sql` adds the Telegram mode column.
+
+## Testing
+
+The test suite covers:
+
+- web chat authentication and RBAC,
+- message and conversation persistence,
+- history after reload,
+- shared mode persistence,
+- mode-aware task metadata and prompts,
+- specialist auto-routing,
+- task execution status,
+- web and Telegram duplicate prevention,
+- approval-required actions and `/confirm`,
+- Telegram formatting, `/task`, `/mode` and `/report full`,
+- HTML escaping and safe message splitting,
+- existing login, CRM, D1 and provider tests.
