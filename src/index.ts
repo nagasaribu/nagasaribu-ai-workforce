@@ -1250,6 +1250,25 @@ async function executeTask(
     );
   }
 }
+const TELEGRAM_AGENT_DIRECTIVE_RE =
+  /\b(?:gunakan|tugaskan|untuk|assign(?:kan)?(?:\s+to)?|use|to)\s+(marketing ai|qs ai|finance ai|technical ai|creative studio|sara)\b/i;
+
+async function resolveTelegramAgent(
+  env: Env,
+  text: string,
+): Promise<{ id: string; name: string } | null> {
+  const match = TELEGRAM_AGENT_DIRECTIVE_RE.exec(text);
+  if (!match) return null;
+  const name = match[1].replace(/\s+/g, " ").trim();
+  const row = await env.DB.prepare(
+    `SELECT id, name FROM agent_registry
+     WHERE lower(name) = lower(?) AND status = 'active' LIMIT 1`,
+  )
+    .bind(name)
+    .first<{ id: string; name: string }>();
+  return row ?? null;
+}
+
 async function runTelegramTask(
   env: Env,
   request: Request,
@@ -1272,11 +1291,13 @@ async function runTelegramTask(
       telegram_chat_id: input.chatId,
       requiresApproval: input.requiresApproval,
     };
-    const columns = stateColumns("pending");
+    const assignedAgent = await resolveTelegramAgent(env, text);
+    const initialState = assignedAgent ? "assigned" : "pending";
+    const columns = stateColumns(initialState);
     taskId = newId();
     await env.DB.prepare(
-      `INSERT INTO tasks (id, title, description, status, execution_state, priority, created_by, metadata)
-       VALUES (?, ?, ?, ?, ?, 'normal', ?, ?)`,
+      `INSERT INTO tasks (id, title, description, status, execution_state, priority, assigned_agent_id, created_by, metadata)
+       VALUES (?, ?, ?, ?, ?, 'normal', ?, ?, ?)`,
     )
       .bind(
         taskId,
@@ -1284,6 +1305,7 @@ async function runTelegramTask(
         text,
         columns.status,
         columns.execution_state,
+        assignedAgent?.id ?? null,
         user.id,
         JSON.stringify(metadata),
       )
@@ -1293,14 +1315,21 @@ async function runTelegramTask(
       taskId,
       "created",
       user.id,
-      "Tugasan dicipta melalui Telegram.",
+      assignedAgent
+        ? `Tugasan dicipta melalui Telegram dan ditugaskan kepada ${assignedAgent.name}.`
+        : "Tugasan dicipta melalui Telegram.",
       null,
-      "pending",
-      { source: "telegram", requiresApproval: input.requiresApproval },
+      initialState,
+      {
+        source: "telegram",
+        requiresApproval: input.requiresApproval,
+        assignedAgentId: assignedAgent?.id ?? null,
+      },
     );
     await audit(env, request, user.id, "telegram.task.create", "task", taskId, {
       chatId: input.chatId,
       requiresApproval: input.requiresApproval,
+      assignedAgentId: assignedAgent?.id ?? null,
     });
 
     if (input.requiresApproval) {

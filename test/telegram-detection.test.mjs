@@ -26,6 +26,39 @@ test("customer and marketing analysis language is not an external action", () =>
   }
 });
 
+test("negation scope survives coordinated action lists", () => {
+  const safe = [
+    "Jangan hantar mesej, hubungi pelanggan atau terbitkan iklan.",
+    "Jangan hantar mesej atau hubungi prospek.",
+    "Analisis sahaja. Jangan hantar, hubungi atau terbitkan.",
+    "Prepare a marketing strategy. Do not send messages, contact customers, or publish ads.",
+    "Analisis dan sediakan laporan sahaja. Jangan hantar mesej,\nhubungi pelanggan atau terbitkan iklan.",
+  ];
+
+  for (const text of safe) {
+    assert.equal(isExternalAction(text), false, `must not require approval: ${text}`);
+  }
+});
+
+test("the complete production Telegram instruction is analysis-only", () => {
+  const completeMessage = [
+    "SARA,",
+    "",
+    "Tugaskan Marketing AI untuk menyediakan pelan pemasaran 7 hari bagi perkhidmatan waterproofing di Selangor dan Kuala Lumpur.",
+    "",
+    "Saya mahu:",
+    "1. Strategi mendapatkan pelanggan.",
+    "2. Sasaran pasaran.",
+    "3. Lima saluran pemasaran.",
+    "4. Aktiviti harian.",
+    "5. Anggaran kos dan potensi jualan.",
+    "",
+    "Analisis dan sediakan laporan sahaja. Jangan hantar mesej, hubungi pelanggan atau terbitkan iklan.",
+  ].join("\n");
+
+  assert.equal(isExternalAction(completeMessage), false);
+});
+
 test("explicit negative instructions do not trigger an external action", () => {
   const safe = [
     "Jangan hantar sebarang mesej",
@@ -35,6 +68,7 @@ test("explicit negative instructions do not trigger an external action", () => {
     "Elakkan menghantar e-mel kepada prospek",
     "Sediakan draf mesej untuk pelanggan. Jangan hantar.",
     "Analisis pelanggan dan sediakan pelan pemasaran 7 hari. Jangan hantar sebarang mesej.",
+    "Analisis prospek dan sediakan draf mesej, tetapi jangan hantar kepada pelanggan.",
   ];
 
   for (const text of safe) {
@@ -47,8 +81,10 @@ test("genuine external actions still require approval", () => {
     "hantar WhatsApp kepada pelanggan",
     "hantar e-mel kepada prospek",
     "hubungi pelanggan",
+    "hubungi prospek untuk mendapatkan projek",
     "telefon prospek",
     "terbitkan iklan",
+    "terbitkan iklan waterproofing",
     "laksanakan kempen pemasaran",
     "buat pembayaran",
     "beli atau langgan perkhidmatan",
@@ -73,5 +109,15 @@ test("negation only suppresses the negated clause, not a separate positive actio
     isExternalAction("Jangan hantar mesej tetapi hantar WhatsApp kepada pelanggan."),
     true,
     "a separate positive send instruction must still be gated",
+  );
+  assert.equal(
+    isExternalAction("Jangan buat pembayaran, hantar WhatsApp kepada pelanggan."),
+    true,
+    "a later positive send action must still be gated",
+  );
+  assert.equal(
+    isExternalAction("Hantar WhatsApp, jangan hantar e-mel."),
+    true,
+    "a positive action before a negated action must still be gated",
   );
 });

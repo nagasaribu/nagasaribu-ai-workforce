@@ -856,60 +856,108 @@ async function formatReport(env: Env): Promise<string> {
 }
 
 const NEGATION_RE =
-  /\b(jangan|janganlah|jgn|jng|usah|usahlah|tidak|tak|tanpa|elak|elakkan)\b/i;
+  /\b(jangan|janganlah|jgn|jng|usah|usahlah|tidak|tak|tanpa|elak|elakkan|do\s+not|dont|never|avoid|without)\b/i;
 
-const NEGATABLE_ACTION_RE =
-  /\b(hantar|menghantar|dihantar|kirim|mengirim|hubungi|menghubungi|telefon|menelefon|panggil|memanggil|sms|whatsapp|whatsappkan|email|emailkan|e[\s-]?mel|terbit|terbitkan|menerbitkan|publish|posting|siar|siarkan|laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|bayar|membayar|pembayaran|beli|membeli|pembelian|langgan|melanggan|berlanggan|langganan|tempah|menempah|book|booking|tandatangan|menandatangani|sign)\b/i;
+const NON_ACTION_VERB_RE =
+  /\b(analisis|analisa|kaji|sediakan|siapkan|bina|rancang|rancangkan|susun|kumpul|semak|nilai|kira|draf|tulis|ringkaskan|prepare|prepare|analyses|analyse|analyze|create|build|draft|review|calculate|plan)\b/i;
 
 const SEND_ACTION_RE =
-  /\b(hantar|menghantar|dihantar|kirim|mengirim|emailkan|whatsappkan)\b[^.!?;\n]{0,140}\b(kepada|whatsapp|email|e[\s-]?mel|sms|mesej|message|surat|invois|invoice|sebut harga|quotation|tawaran|kontrak|iklan|kempen|pelanggan|prospek|client|customer|lead|pembekal|vendor)\b/i;
+  /\b(hantar|menghantar|dihantar|kirim|mengirim|emailkan|whatsappkan|send|sending|email|e[\s-]?mail|text|texting|whatsapp)\b[^.!?;\n]{0,140}\b(kepada|to|whatsapp|email|e[\s-]?mel|sms|mesej|message|messages|surat|invois|invoice|sebut harga|quotation|tawaran|kontrak|iklan|ads?|advertisements?|kempen|campaign|pelanggan|prospek|client|customer|lead|pembekal|vendor|clients|customers|prospects|leads)\b/i;
 
 const CONTACT_ACTION_RE =
-  /\b(hubungi|menghubungi|telefon|menelefon|panggil|memanggil|sms|contact|call)\b[^.!?;\n]{0,100}\b(pelanggan|prospek|client|customer|lead|orang|nombor|kepada|pembekal|vendor)\b/i;
+  /\b(hubungi|menghubungi|telefon|menelefon|panggil|memanggil|sms|contact|contacting|call|calling)\b[^.!?;\n]{0,100}\b(pelanggan|prospek|client|customer|lead|orang|nombor|kepada|pembekal|vendor|clients|customers|prospects|leads)\b/i;
 
 const PUBLISH_ACTION_RE =
-  /\b(terbit|terbitkan|menerbitkan|diterbitkan|publish|publishing|posting|siar|siarkan|menyiarkan)\b/i;
+  /\b(terbit|terbitkan|menerbitkan|diterbitkan|publish|publishing|posting|siar|siarkan|menyiarkan|advertise|advertising)\b/i;
 
 const CAMPAIGN_ACTION_RE =
-  /\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch)\b[^.!?;\n]{0,100}\b(kempen|campaign)\b/i;
+  /\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch|run|execute|start)\b[^.!?;\n]{0,100}\b(kempen|campaign)\b/i;
 
 const CAMPAIGN_REVERSE_RE =
-  /\b(kempen|campaign)\b[^.!?;\n]{0,100}\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch)\b/i;
+  /\b(kempen|campaign)\b[^.!?;\n]{0,100}\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch|run|execute|start)\b/i;
 
 const PAYMENT_ACTION_RE =
-  /\b(bayar|membayar|pembayaran|payment|beli|membeli|pembelian|purchase|langgan|melanggan|berlanggan|langganan|subscription|subscribe|tempah|menempah|booking)\b/i;
+  /\b(bayar|membayar|pembayaran|payment|pay|beli|membeli|pembelian|purchase|langgan|melanggan|berlanggan|langganan|subscription|subscribe|tempah|menempah|booking|book|buy)\b/i;
 
 const COMMITMENT_ACTION_RE =
   /\b(tandatangan|menandatangani|ditandatangani|sign|signing)\b[^.!?;\n]{0,80}\b(kontrak|contract|perjanjian|agreement|tawaran|offer)\b/i;
 
+const COORDINATOR_RE = /\b(atau|or)\b/i;
+
+const ACTION_PATTERNS = [
+  SEND_ACTION_RE,
+  CONTACT_ACTION_RE,
+  PUBLISH_ACTION_RE,
+  CAMPAIGN_ACTION_RE,
+  CAMPAIGN_REVERSE_RE,
+  PAYMENT_ACTION_RE,
+  COMMITMENT_ACTION_RE,
+];
+
+function matchIndices(pattern: RegExp, text: string): number[] {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  const indices: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(text)) !== null) {
+    indices.push(match.index);
+    if (match[0].length === 0) matcher.lastIndex += 1;
+  }
+  return indices;
+}
+
+function externalActionIndices(text: string): number[] {
+  const indices = ACTION_PATTERNS.flatMap((pattern) => matchIndices(pattern, text));
+  return [...new Set(indices)].sort((a, b) => a - b);
+}
+
+function unitHasUnnegatedAction(unit: string): boolean {
+  const actionIndices = externalActionIndices(unit);
+  if (!actionIndices.length) return false;
+
+  const negationIndices = matchIndices(NEGATION_RE, unit);
+  if (!negationIndices.length) return true;
+
+  const negated = new Set<number>();
+  for (const negationIndex of negationIndices) {
+    const firstActionPosition = actionIndices.findIndex((index) => index >= negationIndex);
+    if (firstActionPosition < 0) continue;
+
+    const firstActionIndex = actionIndices[firstActionPosition];
+    const beforeFirstAction = unit.slice(negationIndex, firstActionIndex);
+    if (NON_ACTION_VERB_RE.test(beforeFirstAction)) continue;
+
+    const afterFirstAction = unit.slice(firstActionIndex);
+    const coordinatedList = COORDINATOR_RE.test(afterFirstAction);
+    const extendsAcrossComma = coordinatedList || !afterFirstAction.includes(",");
+    const lastActionPosition = extendsAcrossComma
+      ? actionIndices.length - 1
+      : firstActionPosition;
+
+    for (let i = firstActionPosition; i <= lastActionPosition; i += 1) {
+      negated.add(actionIndices[i]);
+    }
+  }
+
+  return actionIndices.some((index) => !negated.has(index));
+}
+
 function stripNegatedActionClauses(text: string): string {
   return text
-    .split(/[.!?;,\n]+|\b(?:tetapi|tapi|namun|sebaliknya|kemudian)\b/i)
-    .map((clause) => clause.trim())
-    .filter((clause) => clause && !(NEGATION_RE.test(clause) && NEGATABLE_ACTION_RE.test(clause)))
+    .split(/[.!?;\n]+|\b(?:tetapi|tapi|namun|sebaliknya|kemudian|but|however|then)\b/i)
+    .map((unit) => unit.trim())
+    .filter((unit) => unit && unitHasUnnegatedAction(unit))
     .join(" ");
 }
 
 export function isExternalAction(text: string): boolean {
   const normalized = String(text ?? "")
     .toLowerCase()
-    .replace(/[’‘`]/g, "")
+    .replace(/['’‘`]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   if (!normalized) return false;
-
-  const actionable = stripNegatedActionClauses(normalized);
-  if (!actionable) return false;
-
-  return (
-    SEND_ACTION_RE.test(actionable) ||
-    CONTACT_ACTION_RE.test(actionable) ||
-    PUBLISH_ACTION_RE.test(actionable) ||
-    CAMPAIGN_ACTION_RE.test(actionable) ||
-    CAMPAIGN_REVERSE_RE.test(actionable) ||
-    PAYMENT_ACTION_RE.test(actionable) ||
-    COMMITMENT_ACTION_RE.test(actionable)
-  );
+  return stripNegatedActionClauses(normalized).length > 0;
 }
 
 function parseCommand(text: string): { command: string; args: string } | null {

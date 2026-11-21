@@ -14,6 +14,7 @@ const WEBHOOK_URL = `${ORIGIN}/telegram/webhook`;
 let mf;
 let adminToken = null;
 let adminId = null;
+let marketingAgentId = null;
 let pairingCode = null;
 const sentMessages = [];
 const outboundCalls = [];
@@ -209,6 +210,19 @@ test("administrator setup creates the dashboard account", async () => {
     },
   });
   assert.equal(agent.status, 201);
+
+  const marketing = await call("/api/agents", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      name: "Marketing AI",
+      kind: "customer_acquisition",
+      description: "Ejen pemasaran untuk ujian Telegram.",
+      capabilities: ["customer_acquisition", "campaign_planning", "market_research"],
+    },
+  });
+  assert.equal(marketing.status, 201);
+  marketingAgentId = marketing.data.agent.id;
 });
 
 test("unpaired Telegram users are rejected and never trusted automatically", async () => {
@@ -386,20 +400,35 @@ test("external actions require explicit confirmation before execution", async ()
   assert.ok(logs.results.length >= 1);
 });
 
-test("analysis-only Telegram tasks execute without a false approval gate", async () => {
-  const text =
-    "Analisis pelanggan waterproofing dan sediakan pelan pemasaran 7 hari. Jangan hantar sebarang mesej.";
+test("the complete analysis-only Telegram instruction executes without an approval gate", async () => {
+  const text = [
+    "SARA,",
+    "",
+    "Tugaskan Marketing AI untuk menyediakan pelan pemasaran 7 hari bagi perkhidmatan waterproofing di Selangor dan Kuala Lumpur.",
+    "",
+    "Saya mahu:",
+    "1. Strategi mendapatkan pelanggan.",
+    "2. Sasaran pasaran.",
+    "3. Lima saluran pemasaran.",
+    "4. Aktiviti harian.",
+    "5. Anggaran kos dan potensi jualan.",
+    "",
+    "Analisis dan sediakan laporan sahaja. Jangan hantar mesej, hubungi pelanggan atau terbitkan iklan.",
+  ].join("\n");
+
   const response = await sendUpdate(messageUpdate(2007, text));
   assert.equal(response.status, 200);
   assert.doesNotMatch(lastSent().text, /PENGESAHAN DIPERLUKAN/);
   assert.match(lastSent().text, /ID:/);
+  assert.match(lastSent().text, /MOD MOCK|HASIL SARA/);
 
   const task = await dbFirst(
-    "SELECT id, execution_count, execution_state, metadata FROM tasks WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1",
-    "Analisis pelanggan waterproofing%",
+    "SELECT id, execution_count, execution_state, assigned_agent_id, metadata FROM tasks WHERE description = ? ORDER BY created_at DESC LIMIT 1",
+    text,
   );
   assert.ok(task);
   assert.equal(task.execution_count, 1, "analysis-only task should execute exactly once");
+  assert.equal(task.assigned_agent_id, marketingAgentId, "Marketing AI must receive the task");
   assert.notEqual(JSON.parse(task.metadata).requiresApproval, true);
 
   const approvals = await dbFirst(
@@ -407,6 +436,15 @@ test("analysis-only Telegram tasks execute without a false approval gate", async
     task.id,
   );
   assert.equal(approvals.count, 0, "analysis-only task must not create an approval record");
+
+  const events = await dbAll(
+    "SELECT event_type FROM task_events WHERE task_id = ? ORDER BY created_at ASC",
+    task.id,
+  );
+  const types = events.results.map((event) => event.event_type);
+  assert.ok(types.includes("execution_started"));
+  assert.ok(types.includes("execution_mock"));
+  assert.ok(!types.includes("approval_required"));
 });
 
 test("admin Telegram status exposes connection state without secrets", async () => {
