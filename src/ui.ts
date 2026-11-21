@@ -323,15 +323,16 @@ export const consoleHtml = String.raw`<!doctype html>
 <dialog id="task-dialog">
   <form id="task-edit-form">
     <h2>Kemas Kini Tugas</h2>
-    <p class="dialog-sub">Kemas kini status, penugasan, keupayaan atau gerbang kelulusan.</p>
+    <p class="dialog-sub">Hanya peralihan state yang sah dipaparkan. Alat luaran memerlukan kelulusan.</p>
     <input type="hidden" name="id">
     <div class="form-grid">
       <label class="wide">Tajuk<input name="title" type="text" maxlength="200" required></label>
       <label class="wide">Keterangan<textarea name="description" maxlength="5000"></textarea></label>
-      <label>Status<select name="status"></select></label>
+      <label>State<select name="state"></select></label>
       <label>Keutamaan<select name="priority"></select></label>
       <label class="wide">Ejen<select name="assignedAgentId"></select></label>
       <label>Keupayaan<input name="capability" type="text" maxlength="80" placeholder="contoh: orchestration"></label>
+      <label>Alat dalaman<select name="tool"></select></label>
       <label class="check"><input name="requiresApproval" type="checkbox"> Perlukan kelulusan</label>
       <label class="wide">Hasil / ralat terakhir<textarea name="lastResult" readonly placeholder="Belum ada pelaksanaan"></textarea></label>
     </div>
@@ -397,8 +398,27 @@ export const consoleHtml = String.raw`<!doctype html>
 
   var ROLE_LABELS = { admin: "Pentadbir", manager: "Pengurus", agent: "Ejen", viewer: "Pemerhati" };
   var TASK_STATUS = {
-    pending: "Menunggu", assigned: "Ditugaskan", in_progress: "Sedang Berjalan",
-    blocked: "Terhalang", completed: "Selesai", cancelled: "Dibatalkan"
+    pending: "Menunggu", assigned: "Ditugaskan", running: "Sedang Berjalan",
+    in_progress: "Sedang Berjalan", blocked: "Terhalang", failed: "Gagal",
+    completed: "Selesai", cancelled: "Dibatalkan"
+  };
+  var TASK_NEXT = {
+    pending: ["pending", "assigned", "blocked", "cancelled"],
+    assigned: ["assigned", "running", "blocked", "cancelled"],
+    running: ["running", "completed", "failed", "blocked", "cancelled"],
+    completed: ["completed", "assigned", "running", "blocked", "cancelled"],
+    failed: ["failed", "assigned", "running", "blocked", "cancelled"],
+    blocked: ["blocked", "assigned", "running", "cancelled"],
+    cancelled: ["cancelled"]
+  };
+  var TOOL_OPTIONS = {
+    "": "Tiada alat",
+    registry_snapshot: "registry_snapshot (baca sahaja)",
+    task_context: "task_context (baca sahaja)",
+    lead_summary: "lead_summary (baca sahaja)",
+    external_publish: "external_publish (perlu kelulusan)",
+    send_campaign: "send_campaign (perlu kelulusan)",
+    payment: "payment (perlu kelulusan)"
   };
   var PRIORITY = { low: "Rendah", normal: "Biasa", high: "Tinggi", urgent: "Mendesak" };
   var LEAD_STATUS = {
@@ -454,9 +474,9 @@ export const consoleHtml = String.raw`<!doctype html>
   function badge(value, map) {
     var tone = "slate";
     if (value === "completed" || value === "won" || value === "approved" || value === "active") tone = "green";
-    else if (value === "in_progress" || value === "qualified" || value === "assigned") tone = "blue";
+    else if (value === "running" || value === "in_progress" || value === "qualified" || value === "assigned") tone = "blue";
     else if (value === "blocked" || value === "pending" || value === "new" || value === "contacted") tone = "amber";
-    else if (value === "cancelled" || value === "lost" || value === "rejected" || value === "disabled") tone = "red";
+    else if (value === "failed" || value === "cancelled" || value === "lost" || value === "rejected" || value === "disabled") tone = "red";
     return '<span class="badge ' + tone + '">' + esc(label(map, value)) + "</span>";
   }
 
@@ -503,6 +523,17 @@ export const consoleHtml = String.raw`<!doctype html>
   function optionList(map, selected) {
     return Object.keys(map).map(function (key) {
       return '<option value="' + esc(key) + '"' + (key === selected ? " selected" : "") + ">" + esc(map[key]) + "</option>";
+    }).join("");
+  }
+
+  function stateOfTask(task) {
+    return task.execution_state || (task.status === "in_progress" ? "running" : task.status) || "pending";
+  }
+
+  function stateOptions(current) {
+    var states = TASK_NEXT[current] || [current];
+    return states.map(function (state) {
+      return '<option value="' + esc(state) + '"' + (state === current ? " selected" : "") + ">" + esc(TASK_STATUS[state] || state) + "</option>";
     }).join("");
   }
 
@@ -585,7 +616,7 @@ export const consoleHtml = String.raw`<!doctype html>
     return api("/api/dashboard").then(function (data) {
       var recent = data.recentTasks.length
         ? data.recentTasks.map(function (task) {
-            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.assigned_agent_name || task.assigned_user_name || "Belum ditugaskan") + "</div></td><td>" + badge(task.status, TASK_STATUS) + "</td><td>" + esc(fmtDate(task.created_at)) + "</td></tr>";
+            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.assigned_agent_name || task.assigned_user_name || "Belum ditugaskan") + "</div></td><td>" + badge(stateOfTask(task), TASK_STATUS) + "</td><td>" + esc(fmtDate(task.created_at)) + "</td></tr>";
           }).join("")
         : emptyRow(3, "Belum ada tugasan.");
 
@@ -650,24 +681,29 @@ export const consoleHtml = String.raw`<!doctype html>
         ? state.tasks.map(function (task) {
             var meta = {};
             try { meta = JSON.parse(task.metadata || "{}"); } catch (ignore) { meta = {}; }
+            var currentState = stateOfTask(task);
             var needsApproval = meta.requiresApproval === true;
             var approvalCell = task.approval_status
               ? badge(task.approval_status, APPROVAL_STATUS)
               : (needsApproval ? '<span class="badge amber">Belum dimohon</span>' : '<span class="muted">—</span>');
             var resultCell = task.last_error
-              ? '<span class="badge red">Ralat</span><div class="sub">' + esc(String(task.last_error).slice(0, 120)) + "</div>"
+              ? '<span class="badge ' + (currentState === "failed" ? "red" : "amber") + '">' + (currentState === "failed" ? "Gagal" : "Sekatan") + '</span><div class="sub">' + esc(String(task.last_error).slice(0, 120)) + "</div>"
               : (task.result
                   ? '<div class="sub">' + esc(String(task.result).slice(0, 160)) + (String(task.result).length > 160 ? "…" : "") + "</div>"
                   : '<span class="muted">—</span>');
             var execBadge = task.execution_mode
               ? ' <span class="badge ' + (task.execution_mode === "live" ? "green" : "amber") + '">' + esc(task.execution_mode) + "</span>"
               : "";
-            var actions = '<button class="btn btn-sm btn-primary" type="button" data-action="execute-task" data-id="' + esc(task.id) + '">Jalankan</button>';
+            var disabled = currentState === "running" || currentState === "cancelled";
+            var actions = '<button class="btn btn-sm btn-primary" type="button" data-action="execute-task" data-id="' + esc(task.id) + '"' + (disabled ? " disabled" : "") + ">Jalankan</button>";
+            if (!task.assigned_agent_id && !disabled) {
+              actions += '<button class="btn btn-sm" type="button" data-action="auto-assign" data-id="' + esc(task.id) + '">Auto-arah</button>';
+            }
             if (needsApproval && task.approval_status !== "approved") {
               actions += '<button class="btn btn-sm" type="button" data-action="request-approval" data-id="' + esc(task.id) + '">Mohon Kelulusan</button>';
             }
             actions += '<button class="btn btn-sm" type="button" data-action="task-edit" data-id="' + esc(task.id) + '">Kemas Kini</button>';
-            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.description || "Tiada keterangan") + (meta.capability ? " · " + esc(meta.capability) : "") + "</div></td><td>" + badge(task.status, TASK_STATUS) + execBadge + "</td><td>" + esc(task.assigned_agent_name || task.assigned_user_name || "SARA (auto)") + "</td><td>" + resultCell + '</td><td class="hide-sm">' + approvalCell + '</td><td class="hide-sm">' + esc(fmtDate(task.created_at)) + '</td><td><div class="card-actions" style="margin:0">' + actions + "</div></td></tr>";
+            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.description || "Tiada keterangan") + (meta.capability ? " · " + esc(meta.capability) : "") + (meta.tool ? " · alat: " + esc(meta.tool) : "") + "</div></td><td>" + badge(currentState, TASK_STATUS) + execBadge + "</td><td>" + esc(task.assigned_agent_name || task.assigned_user_name || "SARA (auto)") + "</td><td>" + resultCell + '</td><td class="hide-sm">' + approvalCell + '</td><td class="hide-sm">' + esc(fmtDate(task.created_at)) + '</td><td><div class="card-actions" style="margin:0">' + actions + "</div></td></tr>";
           }).join("")
         : emptyRow(7, "Belum ada tugasan. Cipta tugasan pertama anda.");
 
@@ -679,6 +715,7 @@ export const consoleHtml = String.raw`<!doctype html>
           '<label>Keutamaan<select name="priority">' + optionList(PRIORITY, "normal") + "</select></label>" +
           '<label>Ejen<select name="assignedAgentId">' + agentOptions + "</select></label>" +
           '<label>Keupayaan<input name="capability" type="text" maxlength="80" placeholder="contoh: financial_operations"></label>' +
+          '<label>Alat dalaman<select name="tool">' + optionList(TOOL_OPTIONS, "") + "</select></label>" +
           '<label>Tarikh akhir<input name="dueAt" type="date"></label>' +
           '<label class="check wide"><input name="requiresApproval" type="checkbox"> Perlukan kelulusan manusia sebelum pelaksanaan</label>' +
         '</div><div class="form-actions"><button class="btn btn-primary" type="submit">Cipta Tugasan</button></div></form></div></details>' +
@@ -819,14 +856,15 @@ export const consoleHtml = String.raw`<!doctype html>
     form.elements.id.value = task.id;
     form.elements.title.value = task.title;
     form.elements.description.value = task.description || "";
-    form.elements.status.innerHTML = optionList(TASK_STATUS, task.status);
+    var meta = {};
+    try { meta = JSON.parse(task.metadata || "{}"); } catch (ignore) { meta = {}; }
+    form.elements.state.innerHTML = stateOptions(stateOfTask(task));
     form.elements.priority.innerHTML = optionList(PRIORITY, task.priority);
     form.elements.assignedAgentId.innerHTML = '<option value="">Auto-arah melalui SARA</option>' + state.agents.map(function (agent) {
       return '<option value="' + esc(agent.id) + '"' + (agent.id === task.assigned_agent_id ? " selected" : "") + ">" + esc(agent.name) + "</option>";
     }).join("");
-    var meta = {};
-    try { meta = JSON.parse(task.metadata || "{}"); } catch (ignore) { meta = {}; }
     form.elements.capability.value = meta.capability || "";
+    form.elements.tool.innerHTML = optionList(TOOL_OPTIONS, meta.tool || "");
     form.elements.requiresApproval.checked = meta.requiresApproval === true;
     var lastResult = task.last_error ? "RALAT: " + task.last_error : (task.result || "");
     form.elements.lastResult.value = lastResult;
@@ -908,6 +946,7 @@ export const consoleHtml = String.raw`<!doctype html>
           priority: taskData.get("priority"),
           assignedAgentId: taskData.get("assignedAgentId") || null,
           capability: taskData.get("capability"),
+          tool: taskData.get("tool") || null,
           requiresApproval: taskData.get("requiresApproval") === "on",
           dueAt: taskData.get("dueAt") || null
         }
@@ -926,10 +965,11 @@ export const consoleHtml = String.raw`<!doctype html>
         body: {
           title: taskEdit.get("title"),
           description: taskEdit.get("description"),
-          status: taskEdit.get("status"),
+          state: taskEdit.get("state"),
           priority: taskEdit.get("priority"),
           assignedAgentId: taskEdit.get("assignedAgentId") || null,
           capability: taskEdit.get("capability"),
+          tool: taskEdit.get("tool") || "",
           requiresApproval: taskEdit.get("requiresApproval") === "on"
         }
       }).then(function () {
@@ -1083,6 +1123,21 @@ export const consoleHtml = String.raw`<!doctype html>
 
     if (action === "task-edit") {
       openTaskDialog(target.getAttribute("data-id"));
+      return;
+    }
+
+    if (action === "auto-assign") {
+      var autoId = target.getAttribute("data-id");
+      target.disabled = true;
+      api("/api/tasks/" + encodeURIComponent(autoId) + "/auto-assign", { method: "POST", body: {} })
+        .then(function (data) {
+          toast("SARA memilih " + (data.agent ? data.agent.name : "ejen") + ".");
+          switchTab("tasks");
+        })
+        .catch(function (error) {
+          toast(error.message, true);
+          switchTab("tasks");
+        });
       return;
     }
 

@@ -277,6 +277,7 @@ test("tasks can be created, assigned, tracked and completed with events", async 
   assert.equal(created.status, 201);
   taskId = created.data.task.id;
   assert.equal(created.data.task.status, "assigned");
+  assert.equal(created.data.task.execution_state, "assigned");
   assert.equal(created.data.task.priority, "high");
 
   const detail = await call(`/api/tasks/${taskId}`, { token: adminToken });
@@ -301,19 +302,147 @@ test("tasks can be created, assigned, tracked and completed with events", async 
   assert.equal(cleared.status, 200);
   assert.equal(cleared.data.task.assigned_agent_id, null);
 
+  const running = await call(`/api/tasks/${taskId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { state: "running" },
+  });
+  assert.equal(running.status, 200);
+  assert.equal(running.data.task.execution_state, "running");
+  assert.equal(running.data.task.status, "in_progress");
+
   const completed = await call(`/api/tasks/${taskId}`, {
     method: "PATCH",
     token: adminToken,
-    body: { status: "completed" },
+    body: { state: "completed" },
   });
   assert.equal(completed.status, 200);
+  assert.equal(completed.data.task.execution_state, "completed");
   assert.equal(completed.data.task.status, "completed");
   assert.ok(completed.data.task.completed_at);
 
   const after = await call(`/api/tasks/${taskId}`, { token: adminToken });
   const types = after.data.events.map((event) => event.event_type);
   assert.ok(types.includes("assigned"));
-  assert.ok(types.includes("status_changed"));
+  assert.ok(types.includes("state_changed"));
+});
+
+test("the task state machine rejects invalid transitions", async () => {
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: { title: "Ujian peralihan state" },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.task.execution_state, "pending");
+
+  const invalid = await call(`/api/tasks/${created.data.task.id}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { state: "completed" },
+  });
+  assert.equal(invalid.status, 409);
+  assert.equal(invalid.data.error.code, "invalid_transition");
+
+  const assigned = await call(`/api/tasks/${created.data.task.id}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { state: "assigned" },
+  });
+  assert.equal(assigned.status, 200);
+  assert.equal(assigned.data.task.execution_state, "assigned");
+});
+
+test("SARA routes an unassigned task by capability", async () => {
+  const qsAgent = await call("/api/agents", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      name: "QS Ujian",
+      kind: "quantity_surveying",
+      capabilities: ["cost_estimation", "tender_analysis"],
+    },
+  });
+  assert.equal(qsAgent.status, 201);
+
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: { title: "Anggarkan kos projek", capability: "cost_estimation" },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.task.assigned_agent_id, null);
+
+  const routed = await call(`/api/tasks/${created.data.task.id}/auto-assign`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(routed.status, 200);
+  assert.equal(routed.data.agent.id, qsAgent.data.agent.id);
+  assert.equal(routed.data.task.assigned_agent_id, qsAgent.data.agent.id);
+  assert.equal(routed.data.task.execution_state, "assigned");
+
+  const detail = await call(`/api/tasks/${created.data.task.id}`, { token: adminToken });
+  assert.ok(detail.data.events.some((event) => event.event_type === "auto_routed"));
+});
+
+test("safe tools execute, risky tools need approval and never pretend to run", async () => {
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: { title: "Ujian alat", assignedAgentId: agentId },
+  });
+  assert.equal(created.status, 201);
+  const toolTaskId = created.data.task.id;
+
+  const safe = await call(`/api/tasks/${toolTaskId}/tools/registry_snapshot`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(safe.status, 200);
+  assert.ok(Array.isArray(safe.data.output.agents));
+
+  const safeDetail = await call(`/api/tasks/${toolTaskId}`, { token: adminToken });
+  assert.ok(safeDetail.data.events.some((event) => event.event_type === "tool_completed"));
+
+  const blocked = await call(`/api/tasks/${toolTaskId}/tools/external_publish`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.data.error.code, "approval_required");
+  assert.equal(blocked.data.task.execution_state, "blocked");
+
+  const approval = await call("/api/approvals", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      entityType: "task",
+      entityId: toolTaskId,
+      title: "Kelulusan alat luaran",
+      description: "Ujian gerbang kelulusan alat.",
+    },
+  });
+  assert.equal(approval.status, 201);
+
+  const decision = await call(`/api/approvals/${approval.data.approval.id}/decision`, {
+    method: "POST",
+    token: adminToken,
+    body: { decision: "approved" },
+  });
+  assert.equal(decision.status, 200);
+
+  const stillBlocked = await call(`/api/tasks/${toolTaskId}/tools/external_publish`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(stillBlocked.status, 409);
+  assert.equal(stillBlocked.data.error.code, "tool_not_configured");
+  assert.equal(stillBlocked.data.task.execution_state, "blocked");
 });
 
 test("prospective customers and sources are managed without outbound messages", async () => {
@@ -411,7 +540,9 @@ test("task execution runs in mock mode and records events and audit logs", async
   assert.equal(executed.status, 200);
   assert.equal(executed.data.execution.mode, "mock");
   assert.equal(executed.data.execution.live, false);
+  assert.equal(executed.data.execution.success, false);
   assert.equal(executed.data.task.status, "blocked");
+  assert.equal(executed.data.task.execution_state, "blocked");
   assert.match(executed.data.task.result, /MOD MOCK/);
   assert.match(executed.data.task.last_error, /Mod mock/);
 
@@ -645,6 +776,9 @@ test("users and audit logs are protected and never expose password hashes", asyn
     "task.create",
     "task.execute",
     "task.execute_blocked",
+    "task.auto_route",
+    "task.tool",
+    "task.tool_blocked",
     "lead.create",
     "approval.approved",
     "user.create",

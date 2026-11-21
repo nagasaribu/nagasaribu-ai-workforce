@@ -78,7 +78,11 @@ export async function selectAgentForTask(env: Env, task: TaskRecord): Promise<Ag
   return fallback ? { agent: fallback, reason: "default" } : null;
 }
 
-export function buildAgentPrompt(agent: AgentRecord, task: TaskRecord): {
+export function buildAgentPrompt(
+  agent: AgentRecord,
+  task: TaskRecord,
+  toolOutput?: unknown,
+): {
   systemPrompt: string;
   prompt: string;
 } {
@@ -101,6 +105,13 @@ export function buildAgentPrompt(agent: AgentRecord, task: TaskRecord): {
   if (metadata.requiresApproval === true) {
     lines.push("Nota tadbir: tindakan luaran ini memerlukan kelulusan manusia sebelum diteruskan.");
   }
+  if (toolOutput !== undefined) {
+    lines.push(
+      "",
+      "Hasil alat dalaman (sumber benar, jangan cipta semula):",
+      JSON.stringify(toolOutput).slice(0, 5000),
+    );
+  }
 
   lines.push(
     "",
@@ -115,11 +126,12 @@ export async function executeAgent(
   env: Env,
   agent: AgentRecord,
   task: TaskRecord,
+  toolOutput?: unknown,
 ): Promise<ProviderResult> {
   const config = parseAgentConfig(agent);
   const model = typeof config.model === "string" ? config.model : undefined;
   const maxTokens = typeof config.maxTokens === "number" ? config.maxTokens : undefined;
-  const built = buildAgentPrompt(agent, task);
+  const built = buildAgentPrompt(agent, task, toolOutput);
 
   return runDeepSeek(
     { ...env, DEEPSEEK_MODEL: model || env.DEEPSEEK_MODEL },

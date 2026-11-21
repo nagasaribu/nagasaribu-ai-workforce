@@ -68,16 +68,40 @@ To enable live mode:
 printf '%s' 'your-deepseek-api-key' | npx wrangler secret put DEEPSEEK_API_KEY
 ```
 
+## Task state machine
+Tasks expose `execution_state`:
+`pending → assigned → running → completed | failed | blocked`, with `cancelled` as a terminal
+exit. Valid transitions are enforced server-side; invalid transitions return
+`409 invalid_transition`. The legacy `status` column is kept in sync for compatibility
+(`running` maps to `in_progress`, `failed` maps to `blocked`).
+
+`POST /api/tasks/:id/auto-assign` asks SARA to select an active agent by capability, falling
+back to the orchestrator. Assignment and routing are recorded in `task_events` and `audit_logs`.
+
 ## Task execution
 `POST /api/tasks/:id/execute`:
 1. Requires an authenticated user with `tasks.write` permission.
 2. Uses the assigned agent, or SARA routes by task capability.
-3. Checks the approval gate when the task or agent requires approval.
-4. Records `execution_started` in `task_events`.
-5. Calls the provider adapter.
-6. Records `execution_completed`, `execution_mock` or `execution_failed`.
-7. Stores `result`, `last_error`, `execution_mode`, `last_execution_at` and `execution_count`.
-8. Writes a `task.execute` audit log.
+3. Checks the approval gate when the task, agent or tool requires approval.
+4. Transitions the task to `running` with optimistic concurrency protection.
+5. Runs an allowlisted safe internal tool when the task specifies one.
+6. Calls the provider adapter.
+7. Records `execution_completed`, `execution_mock` or `execution_failed`.
+8. Stores `result`, `last_error`, `execution_mode`, `last_execution_at` and `execution_count`.
+9. Writes a `task.execute` audit log.
+
+Mock executions are stored as `blocked`, return `success: false`, and can never be reported
+as completed work. Only a live provider response can move a task to `completed`.
+
+## Safe tools and approval gates
+`POST /api/tasks/:id/tools/:tool` supports:
+- Safe read-only tools: `registry_snapshot`, `task_context`, `lead_summary`.
+- Risky tools: `external_publish`, `send_campaign`, `payment`.
+
+Risky tools require an approved `approvals` row and are never executed in this phase because
+no external integration is configured. They return `409 tool_not_configured`; the system does
+not claim that content was published, messages were sent or payments were made. Every tool
+attempt is recorded in `task_events` and `audit_logs`.
 
 Approval gate:
 - Triggered by task metadata `requiresApproval: true`, agent config `requiresApproval: true`,
@@ -97,13 +121,16 @@ The Malay dashboard shows:
 No leads, tasks or activity are seeded for display purposes.
 
 ## Tests
-`npm test` covers 33 tests:
+`npm test` covers 40 tests:
 - Password hashing, token signing, expiry, tampering and cookies.
 - First-run setup, permanent bootstrap lock, login failures and disabled sessions.
 - RBAC for admin, manager, agent and viewer roles.
 - Privilege-escalation attempts and self-demotion guards.
 - D1 CRUD for agents, tasks, task events, lead sources, leads and approvals.
-- Approval gates and mock task execution.
+- State-machine transitions, invalid transition rejection and legacy status mapping.
+- SARA capability-based routing and assignment.
+- Safe tool execution and risky-tool approval/not-configured behaviour.
+- Approval gates and mock task execution with `success: false`.
 - DeepSeek mock mode, live request shape (stubbed transport), sanitized errors and timeouts.
 - Audit log coverage.
 
@@ -112,6 +139,11 @@ No leads, tasks or activity are seeded for display purposes.
 - `system_settings` and the permanent `bootstrap_completed` flag.
 - Task `result`, `last_error`, `last_execution_at`, `execution_mode`, `execution_count`.
 - Execution indexes.
+
+`migrations/0003_task_state_machine.sql` adds:
+- `tasks.execution_state` with the enforced state values.
+- Backfill from the legacy `status` column.
+- A state index.
 
 Apply:
 ```bash

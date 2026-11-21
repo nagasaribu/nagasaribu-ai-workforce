@@ -18,6 +18,17 @@ import {
   parseJsonObject,
   selectAgentForTask,
 } from "./orchestrator.ts";
+import {
+  allowedTransitions,
+  canTransition,
+  isTaskState,
+  legacyStatus,
+  stateFromLegacy,
+  stateOfTask,
+  TASK_STATES,
+  type TaskState,
+} from "./state.ts";
+import { getTool, isToolName, runSafeTool, ToolError } from "./tools.ts";
 
 const SERVICE = "nagasaribu-ai-workforce";
 const PHASE = 2;
@@ -50,7 +61,6 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   viewer: ["dashboard.read", "tasks.read", "agents.read"],
 };
 
-const TASK_STATUSES = ["pending", "assigned", "in_progress", "blocked", "completed", "cancelled"];
 const TASK_PRIORITIES = ["low", "normal", "high", "urgent"];
 const LEAD_STATUSES = ["new", "contacted", "qualified", "proposal", "won", "lost"];
 const APPROVAL_STATUSES = ["pending", "approved", "rejected", "cancelled"];
@@ -154,6 +164,23 @@ function boolInt(body: Body, key: string): number | undefined {
   if (typeof value === "boolean") return value ? 1 : 0;
   if (value === 0 || value === 1) return value;
   throw new HttpError(400, `Medan ${key} mesti boolean.`);
+}
+
+function requestedState(body: Body): TaskState | undefined {
+  const rawState = body.state;
+  if (rawState !== undefined) {
+    if (!isTaskState(rawState)) {
+      throw new HttpError(400, "Nilai state tidak sah.");
+    }
+    return rawState;
+  }
+  const legacy = str(body, "status", 40);
+  if (legacy === undefined) return undefined;
+  return stateFromLegacy(legacy);
+}
+
+function stateColumns(state: TaskState): { execution_state: TaskState; status: string } {
+  return { execution_state: state, status: legacyStatus(state) };
 }
 
 function stringArray(value: unknown, key: string): string[] | undefined {
@@ -345,7 +372,7 @@ function publicUser(user: AuthUser): Record<string, unknown> {
 }
 
 const TASK_SELECT = `
-  SELECT t.id, t.title, t.description, t.status, t.priority,
+  SELECT t.id, t.title, t.description, t.status, t.execution_state, t.priority,
          t.assigned_agent_id, t.assigned_user_id, t.created_by,
          t.due_at, t.metadata, t.result, t.last_error, t.last_execution_at,
          t.execution_mode, t.execution_count,
@@ -514,10 +541,12 @@ async function handleDashboard(env: Env): Promise<Response> {
   ] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN status IN ('pending','assigned','in_progress','blocked') THEN 1 ELSE 0 END) AS active,
-              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
+              SUM(CASE WHEN execution_state NOT IN ('completed','cancelled') THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN execution_state = 'completed' THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN execution_state = 'failed' THEN 1 ELSE 0 END) AS failed,
+              SUM(CASE WHEN execution_state = 'blocked' THEN 1 ELSE 0 END) AS blocked
        FROM tasks`,
-    ).first<{ total: number; active: number; completed: number }>(),
+    ).first<{ total: number; active: number; completed: number; failed: number; blocked: number }>(),
     env.DB.prepare(
       `SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, COUNT(*) AS total
        FROM agent_registry`,
@@ -573,6 +602,8 @@ async function handleDashboard(env: Env): Promise<Response> {
       total: Number(taskStats?.total ?? 0),
       active: Number(taskStats?.active ?? 0),
       completed: Number(taskStats?.completed ?? 0),
+      failed: Number(taskStats?.failed ?? 0),
+      blocked: Number(taskStats?.blocked ?? 0),
     },
     agents: { active: Number(agentStats?.active ?? 0), total: Number(agentStats?.total ?? 0) },
     leads: {
@@ -609,8 +640,13 @@ async function executeTask(
   id: string,
 ): Promise<Response> {
   requirePermission(user, "tasks.write");
-  if (task.status === "cancelled") {
+
+  const initialState = stateOfTask(task);
+  if (initialState === "cancelled") {
     throw new HttpError(409, "Tugas yang dibatalkan tidak boleh dilaksanakan.", "task_cancelled");
+  }
+  if (initialState === "running") {
+    throw new HttpError(409, "Tugas ini sedang berjalan.", "task_running");
   }
 
   const selection = await selectAgentForTask(env, task);
@@ -632,10 +668,22 @@ async function executeTask(
 
   const metadata = parseJsonObject(task.metadata);
   const agentConfig = parseAgentConfig(agent);
+  const toolName = typeof metadata.tool === "string" ? metadata.tool : "";
+  const tool = toolName ? getTool(toolName) : null;
+  if (toolName && !tool) {
+    await addTaskEvent(env, id, "tool_failed", user.id, `Alat ${toolName} tidak sah.`);
+    await audit(env, request, user.id, "task.execute_blocked", "task", id, {
+      reason: "invalid_tool",
+      tool: toolName,
+    });
+    throw new HttpError(400, "Alat yang dipilih tidak sah.", "invalid_tool");
+  }
+
   const requiresApproval =
     metadata.requiresApproval === true ||
     agentConfig.requiresApproval === true ||
-    parseCapabilities(agent).includes("external_action");
+    parseCapabilities(agent).includes("external_action") ||
+    tool?.risk === "approval_required";
 
   if (requiresApproval) {
     const approved = await env.DB.prepare(
@@ -645,63 +693,108 @@ async function executeTask(
     )
       .bind(id)
       .first<{ id: string }>();
+
     if (!approved) {
+      const blockedAt = nowIso();
+      const blockedColumns = stateColumns("blocked");
+      await env.DB.prepare(
+        `UPDATE tasks SET execution_state = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+      )
+        .bind(
+          blockedColumns.execution_state,
+          blockedColumns.status,
+          "Kelulusan diperlukan sebelum pelaksanaan.",
+          blockedAt,
+          id,
+        )
+        .run();
       await addTaskEvent(
         env,
         id,
         "approval_required",
         user.id,
         "Pelaksanaan disekat sehingga kelulusan diluluskan.",
-        task.status as string,
-        task.status as string,
-        { agentId: agent.id },
+        initialState,
+        "blocked",
+        { agentId: agent.id, tool: toolName || null },
       );
       await audit(env, request, user.id, "task.execute_blocked", "task", id, {
         reason: "approval_required",
         agentId: agent.id,
+        tool: toolName || null,
       });
-      throw new HttpError(
+      return json(
+        {
+          error: {
+            code: "approval_required",
+            message: "Kelulusan diperlukan sebelum tugas ini boleh dilaksanakan.",
+          },
+          task: await getTask(env, id),
+        },
         409,
-        "Kelulusan diperlukan sebelum tugas ini boleh dilaksanakan.",
-        "approval_required",
       );
     }
   }
 
-  if (selection.reason !== "assigned") {
+  let workingState = stateOfTask(task);
+  if (selection.reason !== "assigned" || workingState === "pending") {
+    if (!canTransition(workingState, "assigned")) {
+      throw new HttpError(
+        409,
+        `Peralihan ${workingState} → assigned tidak dibenarkan.`,
+        "invalid_transition",
+      );
+    }
+    const assignedColumns = stateColumns("assigned");
     await env.DB.prepare(
-      `UPDATE tasks
-       SET assigned_agent_id = ?, status = CASE WHEN status = 'pending' THEN 'assigned' ELSE status END, updated_at = ?
-       WHERE id = ?`,
+      `UPDATE tasks SET assigned_agent_id = ?, status = ?, execution_state = ?, last_error = '', updated_at = ? WHERE id = ?`,
     )
-      .bind(agent.id, nowIso(), id)
+      .bind(agent.id, assignedColumns.status, assignedColumns.execution_state, nowIso(), id)
       .run();
     await addTaskEvent(
       env,
       id,
-      "auto_routed",
+      selection.reason === "assigned" ? "assigned" : "auto_routed",
       user.id,
-      `SARA menugaskan tugas kepada ${agent.name}.`,
-      task.status as string,
-      task.status === "pending" ? "assigned" : (task.status as string),
+      selection.reason === "assigned"
+        ? "Tugas ditugaskan kepada ejen."
+        : `SARA memilih ${agent.name} untuk tugas ini.`,
+      workingState,
+      "assigned",
       { agentId: agent.id, reason: selection.reason },
     );
-    await audit(env, request, user.id, "task.auto_route", "task", id, {
-      agentId: agent.id,
-      reason: selection.reason,
-    });
+    if (selection.reason !== "assigned") {
+      await audit(env, request, user.id, "task.auto_route", "task", id, {
+        agentId: agent.id,
+        reason: selection.reason,
+      });
+    }
+    workingState = "assigned";
+  }
+
+  if (!canTransition(workingState, "running")) {
+    throw new HttpError(
+      409,
+      `Peralihan ${workingState} → running tidak dibenarkan.`,
+      "invalid_transition",
+    );
   }
 
   const provider = getProviderStatus(env);
   const startedAt = nowIso();
-  await env.DB.prepare(
+  const runningColumns = stateColumns("running");
+  const started = await env.DB.prepare(
     `UPDATE tasks
-     SET status = 'in_progress', last_error = '', last_execution_at = ?, execution_mode = ?,
-         execution_count = execution_count + 1, completed_at = NULL, updated_at = ?
-     WHERE id = ?`,
+     SET execution_state = 'running', status = ?, last_error = '', last_execution_at = ?,
+         execution_mode = ?, execution_count = execution_count + 1, completed_at = NULL, updated_at = ?
+     WHERE id = ? AND execution_state <> 'running' AND execution_state <> 'cancelled'`,
   )
-    .bind(startedAt, provider.mode, startedAt, id)
+    .bind(runningColumns.status, startedAt, provider.mode, startedAt, id)
     .run();
+
+  if (!started.meta.changes) {
+    throw new HttpError(409, "Tugas ini sedang berjalan.", "task_running");
+  }
 
   await addTaskEvent(
     env,
@@ -709,31 +802,131 @@ async function executeTask(
     "execution_started",
     user.id,
     `Pelaksanaan bermula oleh ${agent.name} (mod ${provider.mode}).`,
-    task.status as string,
-    "in_progress",
-    { agentId: agent.id, mode: provider.mode, model: provider.model },
+    workingState,
+    "running",
+    { agentId: agent.id, mode: provider.mode, model: provider.model, tool: toolName || null },
   );
 
+  let toolOutput: unknown;
+  if (tool?.risk === "safe") {
+    try {
+      toolOutput = await runSafeTool(env, { ...task, assigned_agent_id: agent.id, execution_state: "running" }, tool.name);
+      await addTaskEvent(
+        env,
+        id,
+        "tool_completed",
+        user.id,
+        `Alat ${tool.name} selesai dijalankan.`,
+        "running",
+        "running",
+        { tool: tool.name, risk: "safe" },
+      );
+      await audit(env, request, user.id, "task.tool", "task", id, {
+        tool: tool.name,
+        outcome: "completed",
+      });
+    } catch (error) {
+      const toolError =
+        error instanceof ToolError ? error : new ToolError("tool_failed", "Alat dalaman gagal dijalankan.");
+      const failedAt = nowIso();
+      const failedColumns = stateColumns("failed");
+      await env.DB.prepare(
+        `UPDATE tasks SET execution_state = 'failed', status = ?, last_error = ?, last_execution_at = ?, updated_at = ? WHERE id = ?`,
+      )
+        .bind(failedColumns.status, toolError.message, failedAt, failedAt, id)
+        .run();
+      await addTaskEvent(
+        env,
+        id,
+        "tool_failed",
+        user.id,
+        toolError.message,
+        "running",
+        "failed",
+        { tool: tool.name, code: toolError.code },
+      );
+      await audit(env, request, user.id, "task.tool", "task", id, {
+        tool: tool.name,
+        outcome: "failed",
+        code: toolError.code,
+      });
+      return json(
+        {
+          error: { code: toolError.code, message: toolError.message },
+          task: await getTask(env, id),
+        },
+        502,
+      );
+    }
+  }
+
+  if (tool?.risk === "approval_required") {
+    const blockedAt = nowIso();
+    const blockedColumns = stateColumns("blocked");
+    await env.DB.prepare(
+      `UPDATE tasks SET execution_state = 'blocked', status = ?, last_error = ?, last_execution_at = ?, updated_at = ? WHERE id = ?`,
+    )
+      .bind(
+        blockedColumns.status,
+        "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+        blockedAt,
+        blockedAt,
+        id,
+      )
+      .run();
+    await addTaskEvent(
+      env,
+      id,
+      "tool_not_configured",
+      user.id,
+      "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+      "running",
+      "blocked",
+      { tool: tool.name, risk: "approval_required" },
+    );
+    await audit(env, request, user.id, "task.tool", "task", id, {
+      tool: tool.name,
+      outcome: "not_configured",
+    });
+    return json(
+      {
+        error: {
+          code: "tool_not_configured",
+          message: "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+        },
+        task: await getTask(env, id),
+      },
+      409,
+    );
+  }
+
   try {
-    const result = await executeAgent(env, agent, { ...task, assigned_agent_id: agent.id });
+    const providerResult = await executeAgent(
+      env,
+      agent,
+      { ...task, assigned_agent_id: agent.id, execution_state: "running" },
+      toolOutput,
+    );
     const finishedAt = nowIso();
-    const live = result.mode === "live";
-    const outcomeStatus = live ? "completed" : "blocked";
+    const live = providerResult.mode === "live";
+    const finalState: TaskState = live ? "completed" : "blocked";
+    const finalColumns = stateColumns(finalState);
     const mockError = live
       ? ""
       : "Mod mock: DEEPSEEK_API_KEY tiada; tiada pelaksanaan AI sebenar berlaku.";
 
     await env.DB.prepare(
       `UPDATE tasks
-       SET status = ?, result = ?, last_error = ?, execution_mode = ?, last_execution_at = ?,
-           completed_at = ?, updated_at = ?
+       SET execution_state = ?, status = ?, result = ?, last_error = ?, execution_mode = ?,
+           last_execution_at = ?, completed_at = ?, updated_at = ?
        WHERE id = ?`,
     )
       .bind(
-        outcomeStatus,
-        result.content.slice(0, 20_000),
+        finalColumns.execution_state,
+        finalColumns.status,
+        providerResult.content.slice(0, 20_000),
         mockError,
-        result.mode,
+        providerResult.mode,
         finishedAt,
         live ? finishedAt : null,
         finishedAt,
@@ -746,35 +939,39 @@ async function executeTask(
       id,
       live ? "execution_completed" : "execution_mock",
       user.id,
-      result.content.slice(0, 4000),
-      "in_progress",
-      outcomeStatus,
+      providerResult.content.slice(0, 4000),
+      "running",
+      finalState,
       {
         agentId: agent.id,
-        mode: result.mode,
-        model: result.model,
-        latencyMs: result.latencyMs,
-        usage: result.usage ?? null,
-        requestId: result.requestId ?? null,
+        mode: providerResult.mode,
+        model: providerResult.model,
+        latencyMs: providerResult.latencyMs,
+        usage: providerResult.usage ?? null,
+        requestId: providerResult.requestId ?? null,
+        tool: toolName || null,
       },
     );
     await audit(env, request, user.id, "task.execute", "task", id, {
       agentId: agent.id,
-      mode: result.mode,
-      model: result.model,
+      mode: providerResult.mode,
+      model: providerResult.model,
       outcome: live ? "completed" : "mock_only",
+      success: live,
     });
 
     return json({
       task: await getTask(env, id),
       execution: {
-        mode: result.mode,
+        mode: providerResult.mode,
         live,
-        model: result.model,
-        latencyMs: result.latencyMs,
-        usage: result.usage ?? null,
-        requestId: result.requestId ?? null,
+        success: live,
+        model: providerResult.model,
+        latencyMs: providerResult.latencyMs,
+        usage: providerResult.usage ?? null,
+        requestId: providerResult.requestId ?? null,
         agent: { id: agent.id, name: agent.name },
+        tool: toolName || null,
       },
     });
   } catch (error) {
@@ -783,13 +980,15 @@ async function executeTask(
         ? error
         : new ProviderError("provider_error", "Pelaksanaan AI gagal.", 502);
     const failedAt = nowIso();
+    const failedColumns = stateColumns("failed");
 
     await env.DB.prepare(
       `UPDATE tasks
-       SET status = 'blocked', result = '', last_error = ?, execution_mode = ?, last_execution_at = ?, updated_at = ?
+       SET execution_state = 'failed', status = ?, result = '', last_error = ?, execution_mode = ?,
+           last_execution_at = ?, updated_at = ?
        WHERE id = ?`,
     )
-      .bind(providerError.message, provider.mode, failedAt, failedAt, id)
+      .bind(failedColumns.status, providerError.message, provider.mode, failedAt, failedAt, id)
       .run();
 
     await addTaskEvent(
@@ -798,14 +997,15 @@ async function executeTask(
       "execution_failed",
       user.id,
       providerError.message,
-      "in_progress",
-      "blocked",
+      "running",
+      "failed",
       { agentId: agent.id, mode: provider.mode, code: providerError.code },
     );
     await audit(env, request, user.id, "task.execute", "task", id, {
       agentId: agent.id,
       mode: provider.mode,
       outcome: "failed",
+      success: false,
       code: providerError.code,
     });
 
@@ -818,7 +1018,6 @@ async function executeTask(
     );
   }
 }
-
 async function handleTasks(
   request: Request,
   env: Env,
@@ -836,10 +1035,13 @@ async function handleTasks(
       const where: string[] = [];
       const params: unknown[] = [];
 
-      const status = oneOf(url.searchParams.get("status") ?? undefined, TASK_STATUSES, "status");
-      if (status) {
-        where.push("t.status = ?");
-        params.push(status);
+      const stateParam = url.searchParams.get("state") ?? url.searchParams.get("status");
+      if (stateParam) {
+        if (stateParam !== "in_progress" && !isTaskState(stateParam)) {
+          throw new HttpError(400, "Nilai state tidak sah.");
+        }
+        where.push("t.execution_state = ?");
+        params.push(stateFromLegacy(stateParam));
       }
       const priority = oneOf(url.searchParams.get("priority") ?? undefined, TASK_PRIORITIES, "priority");
       if (priority) {
@@ -880,10 +1082,16 @@ async function handleTasks(
       const assignedUserId = str(body, "assignedUserId", 64) || null;
       const capability = str(body, "capability", 80);
       const requiresApproval = boolInt(body, "requiresApproval");
+      const toolName = str(body, "tool", 60);
 
       const metadata: Record<string, unknown> = {};
       if (capability) metadata.capability = capability;
       if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
+      if (toolName) {
+        if (!isToolName(toolName)) throw new HttpError(400, "Alat yang dipilih tidak sah.");
+        metadata.tool = toolName;
+        if (getTool(toolName)?.risk === "approval_required") metadata.requiresApproval = true;
+      }
 
       if (assignedAgentId) {
         const agent = await env.DB.prepare("SELECT id FROM agent_registry WHERE id = ?")
@@ -899,16 +1107,18 @@ async function handleTasks(
       }
 
       const id = newId();
-      const status = assignedAgentId || assignedUserId ? "assigned" : "pending";
+      const state: TaskState = assignedAgentId || assignedUserId ? "assigned" : "pending";
+      const columns = stateColumns(state);
       await env.DB.prepare(
-        `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, assigned_user_id, created_by, due_at, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, title, description, status, execution_state, priority, assigned_agent_id, assigned_user_id, created_by, due_at, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .bind(
           id,
           title,
           description,
-          status,
+          columns.status,
+          columns.execution_state,
           priority,
           assignedAgentId,
           assignedUserId,
@@ -925,12 +1135,13 @@ async function handleTasks(
         user.id,
         assignedAgentId || assignedUserId ? "Tugas dicipta dan ditugaskan." : "Tugas dicipta.",
         null,
-        status,
+        state,
       );
       await audit(env, request, user.id, "task.create", "task", id, {
         priority,
         capability: capability ?? null,
-        requiresApproval: Boolean(requiresApproval),
+        tool: toolName ?? null,
+        requiresApproval: metadata.requiresApproval === true,
       });
       return json({ task: await getTask(env, id) }, 201);
     }
@@ -966,7 +1177,7 @@ async function handleTasks(
 
     const title = str(body, "title", 200);
     const description = str(body, "description", 5000);
-    const status = oneOf(str(body, "status"), TASK_STATUSES, "status");
+    const nextState = requestedState(body);
     const priority = oneOf(str(body, "priority"), TASK_PRIORITIES, "priority");
     const dueAtRaw = optionalText(body, "dueAt", 40);
     const dueAt = dueAtRaw === undefined ? undefined : dueAtRaw ? isoDate(dueAtRaw, "dueAt") : null;
@@ -974,6 +1185,8 @@ async function handleTasks(
     const assignedUserId = optionalText(body, "assignedUserId", 64);
     const capability = str(body, "capability", 80);
     const requiresApproval = boolInt(body, "requiresApproval");
+    const toolName = str(body, "tool", 60);
+    const currentState = stateOfTask(task);
 
     const updates: string[] = [];
     const params: unknown[] = [];
@@ -989,13 +1202,22 @@ async function handleTasks(
     if (assignedAgentId !== undefined) push("assigned_agent_id", assignedAgentId || null);
     if (assignedUserId !== undefined) push("assigned_user_id", assignedUserId || null);
 
-    if (capability !== undefined || requiresApproval !== undefined) {
+    if (capability !== undefined || requiresApproval !== undefined || toolName !== undefined) {
       const metadata = parseJsonObject(task.metadata);
       if (capability !== undefined) {
         if (capability) metadata.capability = capability;
         else delete metadata.capability;
       }
       if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
+      if (toolName !== undefined) {
+        if (toolName) {
+          if (!isToolName(toolName)) throw new HttpError(400, "Alat yang dipilih tidak sah.");
+          metadata.tool = toolName;
+          if (getTool(toolName)?.risk === "approval_required") metadata.requiresApproval = true;
+        } else {
+          delete metadata.tool;
+        }
+      }
       push("metadata", JSON.stringify(metadata));
     }
 
@@ -1012,9 +1234,18 @@ async function handleTasks(
       if (!assignee) throw new HttpError(400, "Pengguna yang dipilih tidak wujud.");
     }
 
-    if (status !== undefined) {
-      push("status", status);
-      if (status === "completed") push("completed_at", nowIso());
+    if (nextState !== undefined) {
+      if (!canTransition(currentState, nextState)) {
+        throw new HttpError(
+          409,
+          `Peralihan ${currentState} → ${nextState} tidak dibenarkan.`,
+          "invalid_transition",
+        );
+      }
+      const columns = stateColumns(nextState);
+      push("execution_state", columns.execution_state);
+      push("status", columns.status);
+      if (nextState === "completed") push("completed_at", nowIso());
       else push("completed_at", null);
     }
 
@@ -1024,14 +1255,16 @@ async function handleTasks(
       .bind(...params, id)
       .run();
 
-    if (status && status !== task.status) {
-      await addTaskEvent(env, id, "status_changed", user.id, "", task.status as string, status);
+    if (nextState && nextState !== currentState) {
+      await addTaskEvent(env, id, "state_changed", user.id, "", currentState, nextState);
     }
     if (assignedAgentId !== undefined || assignedUserId !== undefined) {
       await addTaskEvent(env, id, "assigned", user.id, "Penugasan dikemas kini.");
     }
     await audit(env, request, user.id, "task.update", "task", id, {
       fields: updates.map((entry) => entry.split(" ")[0]),
+      fromState: currentState,
+      toState: nextState ?? currentState,
     });
     return json({ task: await getTask(env, id) });
   }
@@ -1044,10 +1277,11 @@ async function handleTasks(
     if (!agentId && !userId) throw new HttpError(400, "Sila pilih ejen atau pengguna.");
 
     if (agentId) {
-      const agent = await env.DB.prepare("SELECT id FROM agent_registry WHERE id = ?")
+      const agent = await env.DB.prepare("SELECT id, status FROM agent_registry WHERE id = ?")
         .bind(agentId)
-        .first();
+        .first<{ id: string; status: string }>();
       if (!agent) throw new HttpError(400, "Ejen yang dipilih tidak wujud.");
+      if (agent.status !== "active") throw new HttpError(409, "Ejen yang dipilih tidak aktif.", "agent_inactive");
     }
     if (userId) {
       const assignee = await env.DB.prepare("SELECT id FROM users WHERE id = ?")
@@ -1056,15 +1290,80 @@ async function handleTasks(
       if (!assignee) throw new HttpError(400, "Pengguna yang dipilih tidak wujud.");
     }
 
-    const nextStatus = task.status === "pending" ? "assigned" : task.status;
+    const currentState = stateOfTask(task);
+    if (currentState === "running") {
+      throw new HttpError(409, "Tugas sedang berjalan dan tidak boleh ditugaskan semula.", "task_running");
+    }
+    if (!canTransition(currentState, "assigned")) {
+      throw new HttpError(409, `Peralihan ${currentState} → assigned tidak dibenarkan.`, "invalid_transition");
+    }
+    const columns = stateColumns("assigned");
     await env.DB.prepare(
-      `UPDATE tasks SET assigned_agent_id = ?, assigned_user_id = ?, status = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE tasks SET assigned_agent_id = ?, assigned_user_id = ?, status = ?, execution_state = ?, updated_at = ? WHERE id = ?`,
     )
-      .bind(agentId, userId, nextStatus, nowIso(), id)
+      .bind(agentId, userId, columns.status, columns.execution_state, nowIso(), id)
       .run();
-    await addTaskEvent(env, id, "assigned", user.id, "Tugas ditugaskan semula.");
-    await audit(env, request, user.id, "task.assign", "task", id, { agentId, userId });
+    await addTaskEvent(
+      env,
+      id,
+      "assigned",
+      user.id,
+      "Tugas ditugaskan semula.",
+      currentState,
+      "assigned",
+      { agentId, userId },
+    );
+    await audit(env, request, user.id, "task.assign", "task", id, {
+      agentId,
+      userId,
+      fromState: currentState,
+      toState: "assigned",
+    });
     return json({ task: await getTask(env, id) });
+  }
+
+  if (action === "auto-assign" && method === "POST") {
+    requirePermission(user, "tasks.write");
+    const currentState = stateOfTask(task);
+    if (currentState === "running" || currentState === "cancelled") {
+      throw new HttpError(409, "Tugas ini tidak boleh diagihkan semula.", "invalid_transition");
+    }
+
+    const selection = await selectAgentForTask(env, task);
+    if (!selection || selection.agent.status !== "active") {
+      await addTaskEvent(env, id, "routing_failed", user.id, "Tiada ejen aktif untuk tugas ini.");
+      await audit(env, request, user.id, "task.execute_blocked", "task", id, { reason: "no_agent" });
+      throw new HttpError(409, "Tiada ejen aktif tersedia untuk tugas ini.", "no_agent");
+    }
+    if (!canTransition(currentState, "assigned")) {
+      throw new HttpError(409, `Peralihan ${currentState} → assigned tidak dibenarkan.`, "invalid_transition");
+    }
+
+    const columns = stateColumns("assigned");
+    await env.DB.prepare(
+      `UPDATE tasks SET assigned_agent_id = ?, status = ?, execution_state = ?, updated_at = ? WHERE id = ?`,
+    )
+      .bind(selection.agent.id, columns.status, columns.execution_state, nowIso(), id)
+      .run();
+    await addTaskEvent(
+      env,
+      id,
+      "auto_routed",
+      user.id,
+      `SARA memilih ${selection.agent.name} untuk tugas ini.`,
+      currentState,
+      "assigned",
+      { agentId: selection.agent.id, reason: selection.reason },
+    );
+    await audit(env, request, user.id, "task.auto_route", "task", id, {
+      agentId: selection.agent.id,
+      reason: selection.reason,
+    });
+    return json({
+      task: await getTask(env, id),
+      agent: { id: selection.agent.id, name: selection.agent.name },
+      reason: selection.reason,
+    });
   }
 
   if (action === "events" && method === "POST") {
@@ -1082,6 +1381,123 @@ async function handleTasks(
       .bind(id)
       .all<Record<string, unknown>>();
     return json({ events: events.results }, 201);
+  }
+
+  if (action === "tools" && method === "POST") {
+    requirePermission(user, "tasks.write");
+    const toolName = segments[4] ?? "";
+    const tool = getTool(toolName);
+    if (!tool) throw new HttpError(404, "Alat tidak dijumpai.", "tool_not_found");
+
+    const currentState = stateOfTask(task);
+    if (currentState === "cancelled") {
+      throw new HttpError(409, "Tugas yang dibatalkan tidak boleh menjalankan alat.", "task_cancelled");
+    }
+
+    if (tool.risk === "approval_required") {
+      const approved = await env.DB.prepare(
+        `SELECT id FROM approvals
+         WHERE entity_type = 'task' AND entity_id = ? AND status = 'approved'
+         ORDER BY decided_at DESC LIMIT 1`,
+      )
+        .bind(id)
+        .first<{ id: string }>();
+
+      if (!approved) {
+        const blockedColumns = stateColumns("blocked");
+        await env.DB.prepare(
+          `UPDATE tasks SET execution_state = 'blocked', status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+        )
+          .bind(blockedColumns.status, "Kelulusan diperlukan untuk alat luaran.", nowIso(), id)
+          .run();
+        await addTaskEvent(
+          env,
+          id,
+          "tool_blocked",
+          user.id,
+          "Alat luaran disekat sehingga kelulusan diluluskan.",
+          currentState,
+          "blocked",
+          { tool: tool.name, risk: tool.risk },
+        );
+        await audit(env, request, user.id, "task.tool_blocked", "task", id, {
+          tool: tool.name,
+          reason: "approval_required",
+        });
+        return json(
+          {
+            error: {
+              code: "approval_required",
+              message: "Kelulusan diperlukan sebelum alat luaran ini boleh dijalankan.",
+            },
+            task: await getTask(env, id),
+          },
+          409,
+        );
+      }
+
+      const blockedColumns = stateColumns("blocked");
+      await env.DB.prepare(
+        `UPDATE tasks SET execution_state = 'blocked', status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+      )
+        .bind(
+          blockedColumns.status,
+          "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+          nowIso(),
+          id,
+        )
+        .run();
+      await addTaskEvent(
+        env,
+        id,
+        "tool_not_configured",
+        user.id,
+        "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+        currentState,
+        "blocked",
+        { tool: tool.name, risk: tool.risk },
+      );
+      await audit(env, request, user.id, "task.tool", "task", id, {
+        tool: tool.name,
+        outcome: "not_configured",
+      });
+      return json(
+        {
+          error: {
+            code: "tool_not_configured",
+            message: "Alat luaran belum dikonfigurasikan; tiada tindakan dijalankan.",
+          },
+          task: await getTask(env, id),
+        },
+        409,
+      );
+    }
+
+    try {
+      const output = await runSafeTool(env, task, tool.name);
+      await addTaskEvent(env, id, "tool_completed", user.id, `Alat ${tool.name} selesai dijalankan.`, null, null, {
+        tool: tool.name,
+        risk: "safe",
+      });
+      await audit(env, request, user.id, "task.tool", "task", id, {
+        tool: tool.name,
+        outcome: "completed",
+      });
+      return json({ tool: { name: tool.name, risk: tool.risk }, output });
+    } catch (error) {
+      const toolError =
+        error instanceof ToolError ? error : new ToolError("tool_failed", "Alat dalaman gagal dijalankan.");
+      await addTaskEvent(env, id, "tool_failed", user.id, toolError.message);
+      await audit(env, request, user.id, "task.tool", "task", id, {
+        tool: tool.name,
+        outcome: "failed",
+        code: toolError.code,
+      });
+      return json(
+        { error: { code: toolError.code, message: toolError.message } },
+        502,
+      );
+    }
   }
 
   if (action === "execute" && method === "POST") {
@@ -1117,7 +1533,7 @@ async function handleAgents(
                 a.created_by, a.created_at, a.updated_at,
                 COALESCE((SELECT COUNT(*) FROM tasks t
                           WHERE t.assigned_agent_id = a.id
-                            AND t.status IN ('assigned', 'in_progress', 'blocked')), 0) AS active_tasks
+                            AND t.execution_state NOT IN ('completed', 'cancelled')), 0) AS active_tasks
          FROM agent_registry a ${clause} ORDER BY a.created_at DESC LIMIT 100`,
       )
         .bind(...params)
