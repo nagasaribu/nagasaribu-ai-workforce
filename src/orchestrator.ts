@@ -1,5 +1,5 @@
 import type { Env } from "./types.ts";
-import { runDeepSeek, type ProviderResult } from "./providers/deepseek.ts";
+import { generateWithFallback, type RouterResult } from "./providers/router.ts";
 
 export interface AgentRecord {
   id: string;
@@ -127,7 +127,7 @@ export async function executeAgent(
   agent: AgentRecord,
   task: TaskRecord,
   toolOutput?: unknown,
-): Promise<ProviderResult> {
+): Promise<RouterResult> {
   const config = parseAgentConfig(agent);
   const metadata = parseJsonObject(task.metadata);
   const model = typeof config.model === "string" ? config.model : undefined;
@@ -135,7 +135,7 @@ export async function executeAgent(
   const agentMaxTokens = typeof config.maxTokens === "number" ? config.maxTokens : undefined;
   const built = buildAgentPrompt(agent, task, toolOutput);
 
-  return runDeepSeek(
+  return generateWithFallback(
     { ...env, DEEPSEEK_MODEL: model || env.DEEPSEEK_MODEL },
     {
       systemPrompt: built.systemPrompt,

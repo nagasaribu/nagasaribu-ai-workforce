@@ -10,7 +10,9 @@ import {
 } from "./auth.ts";
 import { consoleHtml } from "./ui.ts";
 import type { AuthUser, Env } from "./types.ts";
-import { getProviderStatus, ProviderError, runDeepSeek } from "./providers/deepseek.ts";
+import { getProviderStatus, ProviderError } from "./providers/deepseek.ts";
+import { getMetaStatus, runMeta } from "./providers/meta.ts";
+import { generateWithFallback, getRouterStatus } from "./providers/router.ts";
 import { getSearchStatus, searchExa, SearchError } from "./providers/exa.ts";
 import { buildProspectQuery, dedupeKey, prospectsFromSearch } from "./research.ts";
 import { analyseProspectsWithDeepSeek } from "./analysis.ts";
@@ -406,7 +408,8 @@ const TASK_SELECT = `
   SELECT t.id, t.title, t.description, t.status, t.execution_state, t.priority,
          t.assigned_agent_id, t.assigned_user_id, t.created_by,
          t.due_at, t.metadata, t.result, t.last_error, t.last_execution_at,
-         t.execution_mode, t.execution_count,
+         t.execution_mode, t.execution_count, t.provider, t.provider_model,
+         t.fallback_used, t.fallback_reason,
          t.created_at, t.updated_at, t.completed_at,
          (SELECT ap.status FROM approvals ap
           WHERE ap.entity_type = 'task' AND ap.entity_id = t.id
@@ -619,7 +622,7 @@ async function handleDashboard(env: Env): Promise<Response> {
        FROM task_events e
        JOIN tasks t ON t.id = e.task_id
        LEFT JOIN users u ON u.id = e.actor_user_id
-       WHERE e.event_type IN ('execution_started','execution_completed','execution_failed','execution_mock','approval_required','auto_routed','routing_failed')
+       WHERE e.event_type IN ('execution_started','execution_completed','execution_failed','execution_mock','provider_fallback','approval_required','auto_routed','routing_failed')
        ORDER BY e.created_at DESC LIMIT 12`,
     ).all<Record<string, unknown>>(),
     env.DB.prepare(
@@ -629,7 +632,40 @@ async function handleDashboard(env: Env): Promise<Response> {
     ).all<Record<string, unknown>>(),
   ]);
 
+  const usageRows = await env.DB.prepare(
+    `SELECT event_type, metadata FROM task_events
+     WHERE event_type IN ('execution_completed','execution_mock','execution_failed','provider_fallback')
+     ORDER BY created_at DESC LIMIT 300`,
+  ).all<{ event_type: string; metadata: string }>();
+
+  let deepseekTokens = 0;
+  let metaTokens = 0;
+  let fallbackEvents = 0;
+  let providerErrors = 0;
+  for (const row of usageRows.results) {
+    let metadata: Record<string, unknown> = {};
+    try {
+      metadata = JSON.parse(row.metadata || "{}") as Record<string, unknown>;
+    } catch {
+      metadata = {};
+    }
+    if (row.event_type === "provider_fallback") fallbackEvents += 1;
+    if (row.event_type === "execution_failed") providerErrors += 1;
+    const usage = metadata.usage && typeof metadata.usage === "object"
+      ? (metadata.usage as Record<string, unknown>)
+      : {};
+    const prompt = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+    const completion = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+    const total = typeof usage.total_tokens === "number" ? usage.total_tokens : prompt + completion;
+    if (metadata.provider === "meta" || String(metadata.model ?? "").includes("muse")) {
+      metaTokens += total;
+    } else {
+      deepseekTokens += total;
+    }
+  }
+
   const ai = getProviderStatus(env);
+  const router = getRouterStatus(env);
 
   return json({
     tasks: {
@@ -652,12 +688,43 @@ async function handleDashboard(env: Env): Promise<Response> {
       failed: Number(executionStats?.failed ?? 0),
       mock: Number(executionStats?.mock ?? 0),
       approvalBlocked: Number(executionStats?.approval_blocked ?? 0),
+      fallbacks: fallbackEvents,
+      providerErrors,
     },
     ai: {
       mode: ai.mode,
       configured: ai.configured,
       model: ai.model,
       reason: ai.reason ?? null,
+    },
+    providers: {
+      primary: {
+        provider: "deepseek",
+        name: "DeepSeek",
+        role: "primary",
+        configured: router.primary.configured,
+        mode: router.primary.mode,
+        model: router.primary.model,
+        reason: router.primary.reason ?? null,
+      },
+      backup: {
+        provider: "meta",
+        name: "Muse Spark",
+        role: "backup",
+        configured: router.backup.configured,
+        available: router.backup.available,
+        model: router.backup.model,
+        reason: router.backup.reason ?? null,
+      },
+      active: router.active,
+      fallbackEnabled: router.fallbackEnabled,
+    },
+    usage: {
+      deepseekTokens,
+      metaTokens,
+      totalTokens: deepseekTokens + metaTokens,
+      fallbackEvents,
+      providerErrors,
     },
     recentTasks: recentTasks.results,
     pendingApprovals: pendingApprovals.results,
@@ -814,7 +881,8 @@ async function executeTask(
     );
   }
 
-  const provider = getProviderStatus(env);
+  const routerStatus = getRouterStatus(env);
+  const primaryProvider = routerStatus.primary;
   const startedAt = nowIso();
   const runningColumns = stateColumns("running");
   const started = await env.DB.prepare(
@@ -823,7 +891,7 @@ async function executeTask(
          execution_mode = ?, execution_count = execution_count + 1, completed_at = NULL, updated_at = ?
      WHERE id = ? AND execution_state <> 'running' AND execution_state <> 'cancelled'`,
   )
-    .bind(runningColumns.status, startedAt, provider.mode, startedAt, id)
+    .bind(runningColumns.status, startedAt, primaryProvider.mode, startedAt, id)
     .run();
 
   if (!started.meta.changes) {
@@ -835,10 +903,17 @@ async function executeTask(
     id,
     "execution_started",
     user.id,
-    `Pelaksanaan bermula oleh ${agent.name} (mod ${provider.mode}).`,
+    `Pelaksanaan bermula oleh ${agent.name} (DeepSeek ${primaryProvider.mode}).`,
     workingState,
     "running",
-    { agentId: agent.id, mode: provider.mode, model: provider.model, tool: toolName || null },
+    {
+      agentId: agent.id,
+      provider: "deepseek",
+      mode: primaryProvider.mode,
+      model: primaryProvider.model,
+      backupAvailable: routerStatus.backup.available,
+      tool: toolName || null,
+    },
   );
 
   let toolOutput: unknown;
@@ -949,9 +1024,35 @@ async function executeTask(
       ? ""
       : "Mod mock: DEEPSEEK_API_KEY tiada; tiada pelaksanaan AI sebenar berlaku.";
 
+    if (providerResult.fallback) {
+      const fallbackMessage = `Fallback daripada DeepSeek kepada Muse Spark (${providerResult.fallbackReason || "ralat sementara"}).`;
+      await addTaskEvent(
+        env,
+        id,
+        "provider_fallback",
+        user.id,
+        fallbackMessage,
+        "running",
+        "running",
+        {
+          primary: "deepseek",
+          provider: providerResult.provider,
+          model: providerResult.model,
+          reason: providerResult.fallbackReason ?? null,
+        },
+      );
+      await audit(env, request, user.id, "task.provider_fallback", "task", id, {
+        primary: "deepseek",
+        provider: providerResult.provider,
+        model: providerResult.model,
+        reason: providerResult.fallbackReason ?? null,
+      });
+    }
+
     await env.DB.prepare(
       `UPDATE tasks
        SET execution_state = ?, status = ?, result = ?, last_error = ?, execution_mode = ?,
+           provider = ?, provider_model = ?, fallback_used = ?, fallback_reason = ?,
            last_execution_at = ?, completed_at = ?, updated_at = ?
        WHERE id = ?`,
     )
@@ -961,6 +1062,10 @@ async function executeTask(
         providerResult.content.slice(0, 20_000),
         mockError,
         providerResult.mode,
+        providerResult.provider,
+        providerResult.model,
+        providerResult.fallback ? 1 : 0,
+        providerResult.fallbackReason ?? "",
         finishedAt,
         live ? finishedAt : null,
         finishedAt,
@@ -978,8 +1083,11 @@ async function executeTask(
       finalState,
       {
         agentId: agent.id,
+        provider: providerResult.provider,
         mode: providerResult.mode,
         model: providerResult.model,
+        fallback: providerResult.fallback,
+        fallbackReason: providerResult.fallbackReason ?? null,
         latencyMs: providerResult.latencyMs,
         usage: providerResult.usage ?? null,
         requestId: providerResult.requestId ?? null,
@@ -988,8 +1096,10 @@ async function executeTask(
     );
     await audit(env, request, user.id, "task.execute", "task", id, {
       agentId: agent.id,
+      provider: providerResult.provider,
       mode: providerResult.mode,
       model: providerResult.model,
+      fallback: providerResult.fallback,
       outcome: live ? "completed" : "mock_only",
       success: live,
     });
@@ -998,8 +1108,11 @@ async function executeTask(
       task: await getTask(env, id),
       execution: {
         mode: providerResult.mode,
+        provider: providerResult.provider,
         live,
         success: live,
+        fallback: providerResult.fallback,
+        fallbackReason: providerResult.fallbackReason ?? null,
         model: providerResult.model,
         latencyMs: providerResult.latencyMs,
         usage: providerResult.usage ?? null,
@@ -1015,14 +1128,28 @@ async function executeTask(
         : new ProviderError("provider_error", "Pelaksanaan AI gagal.", 502);
     const failedAt = nowIso();
     const failedColumns = stateColumns("failed");
+    const failedProvider = providerError.provider ?? "";
+    const failedFallback = providerError.fallbackAttempted ? 1 : 0;
+    const failedReason = providerError.fallbackReason ?? "";
 
     await env.DB.prepare(
       `UPDATE tasks
        SET execution_state = 'failed', status = ?, result = '', last_error = ?, execution_mode = ?,
+           provider = ?, provider_model = '', fallback_used = ?, fallback_reason = ?,
            last_execution_at = ?, updated_at = ?
        WHERE id = ?`,
     )
-      .bind(failedColumns.status, providerError.message, provider.mode, failedAt, failedAt, id)
+      .bind(
+        failedColumns.status,
+        providerError.message,
+        primaryProvider.mode,
+        failedProvider,
+        failedFallback,
+        failedReason,
+        failedAt,
+        failedAt,
+        id,
+      )
       .run();
 
     await addTaskEvent(
@@ -1033,11 +1160,21 @@ async function executeTask(
       providerError.message,
       "running",
       "failed",
-      { agentId: agent.id, mode: provider.mode, code: providerError.code },
+      {
+        agentId: agent.id,
+        provider: failedProvider || null,
+        mode: primaryProvider.mode,
+        fallbackAttempted: Boolean(failedFallback),
+        fallbackReason: failedReason || null,
+        code: providerError.code,
+      },
     );
     await audit(env, request, user.id, "task.execute", "task", id, {
       agentId: agent.id,
-      mode: provider.mode,
+      provider: failedProvider || null,
+      mode: primaryProvider.mode,
+      fallbackAttempted: Boolean(failedFallback),
+      fallbackReason: failedReason || null,
       outcome: "failed",
       success: false,
       code: providerError.code,
@@ -1046,6 +1183,11 @@ async function executeTask(
     return json(
       {
         error: { code: providerError.code, message: providerError.message },
+        execution: {
+          provider: failedProvider || null,
+          fallbackAttempted: Boolean(failedFallback),
+          fallbackReason: failedReason || null,
+        },
         task: await getTask(env, id),
       },
       providerError.status,
@@ -1204,7 +1346,13 @@ async function handleTasks(
     )
       .bind(id)
       .all<Record<string, unknown>>();
-    return json({ task, events: events.results });
+    return json({
+      task,
+      events: events.results.map((event) => ({
+        ...event,
+        metadata: parseJsonObject(event.metadata),
+      })),
+    });
   }
 
   if (!action && method === "PATCH") {
@@ -1423,7 +1571,15 @@ async function handleTasks(
     )
       .bind(id)
       .all<Record<string, unknown>>();
-    return json({ events: events.results }, 201);
+    return json(
+      {
+        events: events.results.map((event) => ({
+          ...event,
+          metadata: parseJsonObject(event.metadata),
+        })),
+      },
+      201,
+    );
   }
 
   if (action === "tools" && method === "POST") {
@@ -1996,7 +2152,7 @@ async function recordProspectSearch(
     resultCount: number;
     status: "ok" | "unavailable" | "error";
     error?: string;
-    analysisMode?: "rules" | "deepseek";
+    analysisMode?: "rules" | "deepseek" | "meta";
   },
 ): Promise<void> {
   await env.DB.prepare(
@@ -2033,6 +2189,7 @@ async function handleProspects(
   if (id === "status" && method === "GET") {
     const search = getSearchStatus(env);
     const ai = getProviderStatus(env);
+    const router = getRouterStatus(env);
     return json({
       search: {
         provider: search.provider,
@@ -2045,6 +2202,8 @@ async function handleProspects(
         mode: ai.mode,
         configured: ai.configured,
         model: ai.model,
+        backup: router.backup.available,
+        fallbackEnabled: router.fallbackEnabled,
         liveDrafts: ai.mode === "live",
       },
       limits: { searchPerWindow: 6, draftPerWindow: 10, windowMinutes: 10 },
@@ -2409,7 +2568,7 @@ async function handleProspects(
     ].join("\n");
 
     try {
-      const result = await runDeepSeek(env, {
+      const result = await generateWithFallback(env, {
         systemPrompt,
         prompt,
         maxTokens: 1200,
@@ -2419,11 +2578,13 @@ async function handleProspects(
       if (!draft) {
         await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
           mode: result.mode,
+          provider: result.provider,
           model: result.model,
+          fallback: result.fallback,
           outcome: "invalid_format",
         });
         return json(
-          { error: { code: "draft_invalid", message: "DeepSeek memulangkan format draf tidak sah; tiada draf disimpan." } },
+          { error: { code: "draft_invalid", message: "Penyedia AI memulangkan format draf tidak sah; tiada draf disimpan." } },
           502,
         );
       }
@@ -2447,12 +2608,20 @@ async function handleProspects(
         .run();
       await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
         mode: result.mode,
+        provider: result.provider,
         model: result.model,
+        fallback: result.fallback,
         outcome: "completed",
       });
       return json({
         draft,
-        provider: { mode: result.mode, model: result.model, live: result.mode === "live" },
+        provider: {
+          mode: result.mode,
+          provider: result.provider,
+          model: result.model,
+          fallback: result.fallback,
+          live: result.mode === "live",
+        },
         draftedAt,
       });
     } catch (error) {
@@ -2462,6 +2631,8 @@ async function handleProspects(
           : new ProviderError("provider_error", "Penjanaan draf gagal.", 502);
       await audit(env, request, user.id, "prospect.draft", "prospect_candidate", id, {
         mode: ai.mode,
+        provider: providerError.provider ?? null,
+        fallback: providerError.fallbackAttempted,
         outcome: "failed",
         code: providerError.code,
       });
@@ -2761,6 +2932,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (path === "/api/ai/status" && request.method === "GET") {
     requirePermission(user, "tasks.read");
     const ai = getProviderStatus(env);
+    const router = getRouterStatus(env);
     return json({
       provider: {
         mode: ai.mode,
@@ -2769,7 +2941,72 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         reason: ai.reason ?? null,
         liveExecutionEnabled: ai.mode === "live",
       },
+      primary: {
+        provider: "deepseek",
+        name: "DeepSeek",
+        configured: router.primary.configured,
+        mode: router.primary.mode,
+        model: router.primary.model,
+        reason: router.primary.reason ?? null,
+      },
+      backup: {
+        provider: "meta",
+        name: "Muse Spark",
+        configured: router.backup.configured,
+        available: router.backup.available,
+        model: router.backup.model,
+        reason: router.backup.reason ?? null,
+      },
+      active: router.active,
+      fallbackEnabled: router.fallbackEnabled,
     });
+  }
+
+  if (path === "/api/ai/providers/test" && request.method === "POST") {
+    if (user.role !== "admin") {
+      throw new HttpError(403, "Hanya pentadbir boleh menguji penyedia AI.", "forbidden");
+    }
+    const body = await readJson(request);
+    const provider = str(body, "provider", 20) ?? "meta";
+    if (provider !== "meta") {
+      throw new HttpError(400, "Penyedia ujian tidak sah.", "invalid_provider");
+    }
+    const maxTokens = optionalInt(body, "maxTokens", 32, 200) ?? 100;
+    try {
+      const result = await runMeta(env, {
+        systemPrompt: "Anda ialah pembantu ujian sistem. Jawab dengan satu ayat ringkas dalam Bahasa Melayu.",
+        prompt: "Sahkan bahawa saluran Muse Spark berfungsi. Sebut nama model dan berikan satu ayat status.",
+        maxTokens,
+      });
+      await audit(env, request, user.id, "ai.provider_test", "provider", "meta", {
+        provider: "meta",
+        model: result.model,
+        usage: result.usage ?? null,
+        outcome: "completed",
+      });
+      return json({
+        provider: "meta",
+        model: result.model,
+        content: result.content,
+        usage: result.usage ?? null,
+        requestId: result.requestId ?? null,
+        latencyMs: result.latencyMs,
+      });
+    } catch (error) {
+      const providerError =
+        error instanceof ProviderError
+          ? error
+          : new ProviderError("provider_error", "Ujian Muse Spark gagal.", 502, false, undefined, "meta");
+      await audit(env, request, user.id, "ai.provider_test", "provider", "meta", {
+        provider: "meta",
+        outcome: "failed",
+        code: providerError.code,
+      });
+      return json(
+        { error: { code: providerError.code, message: providerError.message } },
+        providerError.status,
+      );
+    }
   }
 
   if (segments[1] === "tasks") return handleTasks(request, env, user, segments, url);
@@ -2805,6 +3042,7 @@ async function handleHealth(env: Env): Promise<Response> {
         database: dbOk ? "ok" : "error",
         auth: env.SESSION_SECRET ? "configured" : "missing",
         ai: getProviderStatus(env).mode,
+        backup: getMetaStatus(env).available ? "configured" : "missing",
         search: getSearchStatus(env).available ? "configured" : "unavailable",
       },
     },

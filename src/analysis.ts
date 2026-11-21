@@ -1,6 +1,7 @@
 import type { DiscoveredProspect, ResearchInput } from "./research.ts";
 import type { Env } from "./types.ts";
-import { getProviderStatus, runDeepSeek } from "./providers/deepseek.ts";
+import { getProviderStatus } from "./providers/deepseek.ts";
+import { generateWithFallback } from "./providers/router.ts";
 
 export interface AiAnalysisItem {
   url: string;
@@ -11,7 +12,7 @@ export interface AiAnalysisItem {
 
 export interface AnalysisOutcome {
   prospects: DiscoveredProspect[];
-  mode: "deepseek" | "rules";
+  mode: "deepseek" | "meta" | "rules";
   model?: string;
   reason?: string;
 }
@@ -58,6 +59,7 @@ export function parseAiAnalysis(content: string): AiAnalysisItem[] {
 export function applyAiAnalysis(
   prospects: DiscoveredProspect[],
   items: AiAnalysisItem[],
+  mode: "deepseek" | "meta" = "deepseek",
 ): DiscoveredProspect[] {
   const byUrl = new Map(items.map((item) => [item.url, item]));
   return prospects.map((prospect) => {
@@ -74,7 +76,7 @@ export function applyAiAnalysis(
         .join(" ")
         .slice(0, 1500),
       missingInfo: Array.from(new Set([...prospect.missingInfo, ...item.missing])).slice(0, 15),
-      analysisMode: "deepseek",
+      analysisMode: mode,
       aiAnalysis: item.reason,
     };
   });
@@ -116,7 +118,7 @@ export async function analyseProspectsWithDeepSeek(
   ].join("\n");
 
   try {
-    const result = await runDeepSeek(env, {
+    const result = await generateWithFallback(env, {
       systemPrompt:
         "Anda ialah penganalisis kelayakan prospek. Skor dan terangkan bukti tanpa mencipta data. Jawab dalam Bahasa Melayu.",
       prompt,
@@ -127,9 +129,10 @@ export async function analyseProspectsWithDeepSeek(
     if (!items.length) {
       return { prospects, mode: "rules", reason: "invalid_ai_response" };
     }
+    const mode = result.provider === "meta" ? "meta" : "deepseek";
     return {
-      prospects: applyAiAnalysis(prospects, items),
-      mode: "deepseek",
+      prospects: applyAiAnalysis(prospects, items, mode),
+      mode,
       model: result.model,
     };
   } catch {

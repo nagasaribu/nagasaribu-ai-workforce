@@ -28,6 +28,8 @@ export interface ProviderUsage {
   total_tokens?: number;
 }
 
+export type ProviderName = "deepseek" | "meta";
+
 export interface ProviderResult {
   mode: AiMode;
   model: string;
@@ -35,17 +37,33 @@ export interface ProviderResult {
   latencyMs: number;
   usage?: ProviderUsage;
   requestId?: string;
+  provider?: ProviderName;
 }
 
 export class ProviderError extends Error {
   code: string;
   status: number;
+  retryable: boolean;
+  providerStatus?: number;
+  provider?: ProviderName;
+  fallbackAttempted = false;
+  fallbackReason?: string;
 
-  constructor(code: string, message: string, status = 502) {
+  constructor(
+    code: string,
+    message: string,
+    status = 502,
+    retryable = false,
+    providerStatus?: number,
+    provider?: ProviderName,
+  ) {
     super(message);
     this.name = "ProviderError";
     this.code = code;
     this.status = status;
+    this.retryable = retryable;
+    this.providerStatus = providerStatus;
+    this.provider = provider;
   }
 }
 
@@ -140,12 +158,20 @@ export async function runDeepSeek(
       model: status.model,
       content: mockContent(status, input),
       latencyMs: Date.now() - started,
+      provider: "deepseek",
     };
   }
 
   const apiKey = (env.DEEPSEEK_API_KEY ?? "").trim();
   if (!apiKey) {
-    throw new ProviderError("missing_api_key", "Kunci API AI belum dikonfigurasikan.", 503);
+    throw new ProviderError(
+      "missing_api_key",
+      "Kunci API DeepSeek belum dikonfigurasikan.",
+      503,
+      false,
+      undefined,
+      "deepseek",
+    );
   }
 
   const endpoint = completionEndpoint(env.DEEPSEEK_BASE_URL);
@@ -167,17 +193,50 @@ export async function runDeepSeek(
           { role: "user", content: input.prompt },
         ],
         temperature: Math.min(Math.max(input.temperature ?? 0.2, 0), 1),
-        max_tokens: Math.min(Math.max(input.maxTokens ?? 1200, 64), 4096),
+        max_tokens: Math.min(Math.max(input.maxTokens ?? 1400, 64), 4096),
         stream: false,
       }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new ProviderError(
+          "provider_auth_error",
+          "Pengesahan DeepSeek gagal. Semak DEEPSEEK_API_KEY.",
+          502,
+          false,
+          response.status,
+          "deepseek",
+        );
+      }
+      if (response.status === 429) {
+        throw new ProviderError(
+          "provider_rate_limited",
+          "DeepSeek mengehadkan permintaan (HTTP 429).",
+          503,
+          true,
+          response.status,
+          "deepseek",
+        );
+      }
+      if (response.status >= 500) {
+        throw new ProviderError(
+          "provider_http_error",
+          `DeepSeek memulangkan status ${response.status}.`,
+          503,
+          true,
+          response.status,
+          "deepseek",
+        );
+      }
       throw new ProviderError(
-        "provider_http_error",
-        `Penyedia AI memulangkan status ${response.status}.`,
+        "provider_request_error",
+        `DeepSeek menolak permintaan (HTTP ${response.status}).`,
         502,
+        false,
+        response.status,
+        "deepseek",
       );
     }
 
@@ -188,7 +247,14 @@ export async function runDeepSeek(
     };
     const content = data.choices?.[0]?.message?.content;
     if (typeof content !== "string" || !content.trim()) {
-      throw new ProviderError("provider_invalid_response", "Penyedia AI memulangkan respons kosong.", 502);
+      throw new ProviderError(
+        "provider_invalid_response",
+        "DeepSeek memulangkan respons kosong.",
+        502,
+        false,
+        undefined,
+        "deepseek",
+      );
     }
 
     return {
@@ -198,13 +264,28 @@ export async function runDeepSeek(
       latencyMs: Date.now() - started,
       usage: readUsage(data.usage),
       requestId: typeof data.id === "string" ? data.id : undefined,
+      provider: "deepseek",
     };
   } catch (error) {
     if (error instanceof ProviderError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
-      throw new ProviderError("provider_timeout", "Penyedia AI tidak memberi respons dalam had masa.", 504);
+      throw new ProviderError(
+        "provider_timeout",
+        "DeepSeek tidak memberi respons dalam had masa.",
+        504,
+        true,
+        undefined,
+        "deepseek",
+      );
     }
-    throw new ProviderError("provider_unreachable", "Penyedia AI tidak dapat dihubungi.", 502);
+    throw new ProviderError(
+      "provider_unreachable",
+      "DeepSeek tidak dapat dihubungi.",
+      502,
+      true,
+      undefined,
+      "deepseek",
+    );
   } finally {
     clearTimeout(timer);
   }

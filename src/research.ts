@@ -28,7 +28,7 @@ export interface DiscoveredProspect {
   missingInfo: string[];
   verified: boolean;
   dedupeKey: string;
-  analysisMode: "rules" | "deepseek";
+  analysisMode: "rules" | "deepseek" | "meta";
   aiAnalysis: string;
 }
 

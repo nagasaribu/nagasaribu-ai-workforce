@@ -196,6 +196,7 @@ export const consoleHtml = String.raw`<!doctype html>
   .status-pill.amber { color: var(--amber); background: var(--amber-soft); border-color: #f5dfb5; }
   .status-pill.red { color: var(--red); background: var(--red-soft); border-color: #f7c9c5; }
   .status-pill.slate { color: #475569; background: #eef2f7; border-color: #dbe3ec; }
+  .status-pill.violet { color: var(--violet); background: var(--violet-soft); border-color: #e9d5ff; }
   .env-pill {
     background: var(--navy); color: #dbeafe; font-weight: 800;
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
@@ -255,6 +256,7 @@ export const consoleHtml = String.raw`<!doctype html>
   .hero .status-pill.amber { color: #fde68a; background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.22); }
   .hero .status-pill.red { color: #fecaca; background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.22); }
   .hero .status-pill.slate { color: #cbd5e1; background: rgba(148,163,184,.1); border-color: rgba(148,163,184,.16); }
+  .hero .status-pill.violet { color: #ddd6fe; background: rgba(139,92,246,.14); border-color: rgba(167,139,250,.22); }
   .hero-note { color: #93a9c4; font-size: 11px; margin-top: 10px; line-height: 1.45; }
 
   /* ---------- KPI / panels ---------- */
@@ -825,6 +827,7 @@ export const consoleHtml = String.raw`<!doctype html>
     execution_failed: "Pelaksanaan gagal",
     execution_mock: "Mock sahaja",
     approval_required: "Kelulusan diperlukan",
+    provider_fallback: "Fallback penyedia",
     auto_routed: "Auto-arah SARA",
     routing_failed: "Penghalaan gagal",
     created: "Dicipta",
@@ -1065,6 +1068,7 @@ export const consoleHtml = String.raw`<!doctype html>
       node.innerHTML = [
         statusPill(checks.ai === "live" ? "DeepSeek LIVE" : "DeepSeek MOCK", checks.ai === "live" ? "green" : "amber", null),
         statusPill(checks.search === "configured" ? "Exa READY" : "Exa OFFLINE", checks.search === "configured" ? "teal" : "amber", null),
+        statusPill(checks.backup === "configured" ? "Muse Spark READY" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
         statusPill(checks.database === "ok" ? "D1 HEALTHY" : "D1 DEGRADED", checks.database === "ok" ? "green" : "red", null)
       ].join("");
     }).catch(function () {
@@ -1107,6 +1111,11 @@ export const consoleHtml = String.raw`<!doctype html>
     return '<tr><td colspan="' + cols + '"><div class="empty">' + esc(message) + "</div></td></tr>";
   }
 
+  function providerCard(options) {
+    return '<div class="agent-card"><div class="agent-top"><div class="agent-avatar sm tone-' + options.tone + '">' + (ICONS[options.icon] || ICONS.bolt) + '</div><div class="agent-name-wrap"><h3>' + esc(options.name) + '</h3><div class="agent-role">' + esc(options.role) + '</div></div><div class="agent-status"><span class="badge ' + options.statusTone + '"><span class="dot"></span>' + esc(options.status) + "</span></div></div>" +
+      '<div class="agent-meta"><span>Model <strong>' + esc(options.model) + '</strong></span>' + (options.tokens !== undefined ? "<span><strong>" + esc(options.tokens) + "</strong> token</span>" : "") + "</div></div>";
+  }
+
   function agentMiniCard(agent) {
     var meta = agentMeta(agent);
     var config = {};
@@ -1120,7 +1129,7 @@ export const consoleHtml = String.raw`<!doctype html>
   }
 
   function activityItem(event) {
-    var tone = event.event_type === "execution_completed" ? "green" : (event.event_type === "execution_failed" || event.event_type === "routing_failed") ? "red" : (event.event_type === "approval_required" || event.event_type === "execution_mock") ? "amber" : "blue";
+    var tone = event.event_type === "execution_completed" ? "green" : (event.event_type === "execution_failed" || event.event_type === "routing_failed") ? "red" : (event.event_type === "approval_required" || event.event_type === "execution_mock" || event.event_type === "provider_fallback") ? "amber" : "blue";
     return '<div class="activity-item"><div class="activity-icon tone-' + tone + '">' + ICONS.activity + '</div><div class="activity-body"><div class="activity-title">' + esc(event.task_title || "Aktiviti operasi") + '</div><div class="activity-sub">' + esc(String(event.message || label(EVENT_LABELS, event.event_type)).slice(0, 180)) + '</div></div><div class="activity-meta">' + esc(fmtDate(event.created_at)) + '</div></div>';
   }
 
@@ -1158,6 +1167,7 @@ export const consoleHtml = String.raw`<!doctype html>
         ? [
             statusPill(aiLive ? "DeepSeek LIVE" : "DeepSeek MOCK", aiLive ? "green" : "amber", null),
             statusPill(exaReady ? "Exa READY" : "Exa OFFLINE", exaReady ? "teal" : "amber", null),
+            statusPill(checks.backup === "configured" ? "Muse Spark READY" : "Muse Spark OFFLINE", checks.backup === "configured" ? "violet" : "amber", null),
             statusPill(dbOk ? "D1 HEALTHY" : "D1 DEGRADED", dbOk ? "green" : "red", null)
           ].join("")
         : statusPill("Status sistem tidak tersedia", "slate", null);
@@ -1182,6 +1192,19 @@ export const consoleHtml = String.raw`<!doctype html>
         statCard("Prospek Baharu", data.leads.new, data.leads.total + " prospek dalam CRM", "prospects", "amber") +
         statCard("Kelulusan Menunggu", data.approvals.pending, data.execution.approvalBlocked + " disekat kelulusan", "approvals", "violet") +
         "</div>";
+
+      var providers = data.providers || {};
+      var usage = data.usage || {};
+      var primaryInfo = providers.primary || {};
+      var backupInfo = providers.backup || {};
+      var activeName = providers.active === "deepseek" ? "DeepSeek" : providers.active === "meta" ? "Muse Spark" : "Tiada";
+      var activeModel = providers.active === "meta" ? (backupInfo.model || "muse-spark-1.3") : (primaryInfo.model || "deepseek-chat");
+      var providerCards = [
+        providerCard({ name: "DeepSeek", role: "Primary · Penjana utama", tone: "blue", icon: "bolt", status: primaryInfo.mode === "live" ? "LIVE" : "MOCK", statusTone: primaryInfo.mode === "live" ? "green" : "amber", model: primaryInfo.model || "deepseek-chat", tokens: usage.deepseekTokens || 0 }),
+        providerCard({ name: "Muse Spark", role: "Backup · Fallback automatik", tone: "violet", icon: "sparkles", status: backupInfo.available ? "READY" : "OFFLINE", statusTone: backupInfo.available ? "violet" : "slate", model: backupInfo.model || "muse-spark-1.3", tokens: usage.metaTokens || 0 }),
+        providerCard({ name: "Exa", role: "Search · Carian awam", tone: "teal", icon: "search", status: exaReady ? "READY" : "OFFLINE", statusTone: exaReady ? "teal" : "amber", model: "exa" })
+      ].join("");
+      var providerPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.bolt + ' Provider AI</h2><div class="status-strip">' + statusPill("Aktif: " + activeName, providers.active === "deepseek" ? "green" : providers.active === "meta" ? "violet" : "slate", null) + '</div></div><div class="panel-body"><div class="agent-grid compact">' + providerCards + '</div><div class="detail-grid" style="margin-top:16px"><div class="detail-item"><div class="label">Model Aktif</div><div class="value">' + esc(activeModel) + '</div></div><div class="detail-item"><div class="label">Jumlah Token</div><div class="value">' + esc(usage.totalTokens || 0) + '</div></div><div class="detail-item"><div class="label">Fallback</div><div class="value">' + esc(usage.fallbackEvents || 0) + ' event</div></div><div class="detail-item"><div class="label">Ralat Penyedia</div><div class="value">' + esc(usage.providerErrors || 0) + '</div></div></div><div class="panel-sub" style="margin-top:12px">Fallback automatik hanya untuk timeout, ralat rangkaian, HTTP 429 dan HTTP 5xx. Ralat pengesahan tidak dicuba semula.</div></div></div>';
 
       var agentCards = agents.length
         ? agents.map(agentMiniCard).join("")
@@ -1246,6 +1269,7 @@ export const consoleHtml = String.raw`<!doctype html>
           '<div class="quick-actions">' + quickActions + "</div>" +
         '</div><div class="hero-status"><div class="hero-status-title">Status Sistem</div><div class="status-strip">' + heroStatus + '</div><div class="hero-note">' + esc(systemNote) + "</div></div></div></section>" +
         stats +
+        providerPanel +
         agentsPanel +
         '<div class="grid-2">' + activityPanel + pipelinePanel + "</div>" +
         '<div class="grid-2">' + recentPanel + errorsPanel + "</div>";
@@ -1386,7 +1410,9 @@ export const consoleHtml = String.raw`<!doctype html>
             var ringColor = score >= 60 ? "#0d9488" : score >= 35 ? "#d97706" : "#94a3b8";
             var analysisBadge = candidate.analysis_mode === "deepseek"
               ? '<span class="badge blue"><span class="dot"></span>Analisis DeepSeek</span>'
-              : '<span class="badge slate"><span class="dot"></span>Skor peraturan</span>';
+              : candidate.analysis_mode === "meta"
+                ? '<span class="badge violet"><span class="dot"></span>Analisis Muse Spark</span>'
+                : '<span class="badge slate"><span class="dot"></span>Skor peraturan</span>';
             var missing = (candidate.missingInfo || []).map(function (item) {
               return '<span class="chip">' + esc(item) + "</span>";
             }).join("");
@@ -1569,6 +1595,8 @@ export const consoleHtml = String.raw`<!doctype html>
         ["Keupayaan", esc(meta.capability || "—")],
         ["Alat", esc(meta.tool || "—")],
         ["Pelaksanaan", esc(task.execution_mode || "—") + " · " + esc(task.execution_count || 0) + " kali"],
+        ["Penyedia", task.provider ? esc(task.provider === "meta" ? "Muse Spark" : "DeepSeek") + (task.provider_model ? " · " + esc(task.provider_model) : "") : "—"],
+        ["Fallback", task.fallback_used ? "Ya · " + esc(task.fallback_reason || "sementara") : "Tidak"],
         ["Terakhir", esc(fmtDate(task.last_execution_at))],
         ["Kelulusan", task.approval_status ? badge(task.approval_status, APPROVAL_STATUS) : (meta.requiresApproval ? '<span class="badge amber"><span class="dot"></span>Belum dimohon</span>' : "—")]
       ];
@@ -1586,7 +1614,7 @@ export const consoleHtml = String.raw`<!doctype html>
         : "";
       var timeline = events.length
         ? events.map(function (event) {
-            var tone = event.event_type === "execution_completed" ? "green" : (event.event_type === "execution_failed" || event.event_type === "routing_failed") ? "red" : (event.event_type === "approval_required" || event.event_type === "execution_mock") ? "amber" : "blue";
+            var tone = event.event_type === "execution_completed" ? "green" : (event.event_type === "execution_failed" || event.event_type === "routing_failed") ? "red" : (event.event_type === "approval_required" || event.event_type === "execution_mock" || event.event_type === "provider_fallback") ? "amber" : "blue";
             return '<div class="timeline-item"><span class="timeline-dot ' + tone + '"></span><div class="timeline-body"><div class="timeline-head"><strong>' + esc(label(EVENT_LABELS, event.event_type)) + "</strong><span>" + esc(fmtDate(event.created_at)) + '</span></div><div class="sub">' + esc(event.message || "") + '</div><div class="sub">' + esc(event.actor_name || "Sistem") + "</div></div></div>";
           }).join("")
         : emptyState("activity", "Belum ada peristiwa", "Peristiwa pelaksanaan akan muncul di sini.");

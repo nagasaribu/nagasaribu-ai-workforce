@@ -107,6 +107,7 @@ test("health reports an operational phase 2 service with a working database", as
   assert.equal(response.data.checks.database, "ok");
   assert.equal(response.data.checks.auth, "configured");
   assert.equal(response.data.checks.ai, "mock");
+  assert.equal(response.data.checks.backup, "missing");
   assert.equal(response.data.checks.search, "unavailable");
 });
 

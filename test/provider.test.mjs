@@ -84,12 +84,32 @@ test("provider HTTP errors are sanitized and never include the API key", async (
     ),
     (error) => {
       assert.ok(error instanceof ProviderError);
-      assert.equal(error.code, "provider_http_error");
-      assert.match(error.message, /status 401/);
+      assert.equal(error.code, "provider_auth_error");
+      assert.equal(error.retryable, false);
+      assert.match(error.message, /DeepSeek/);
       assert.doesNotMatch(error.message, /super-secret-key/);
       return true;
     },
   );
+});
+
+test("DeepSeek rate limits and temporary 5xx errors are retryable", async () => {
+  for (const status of [429, 500, 503]) {
+    await assert.rejects(
+      runDeepSeek(
+        { DEEPSEEK_API_KEY: "test-key", DEEPSEEK_BASE_URL: "https://api.deepseek.test" },
+        INPUT,
+        async () => new Response("temporary", { status }),
+      ),
+      (error) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.retryable, true);
+        assert.equal(error.provider, "deepseek");
+        assert.equal(error.providerStatus, status);
+        return true;
+      },
+    );
+  }
 });
 
 test("invalid provider responses are rejected", async () => {
