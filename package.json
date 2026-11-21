@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "db:migrate:local": "wrangler d1 migrations apply nagasaribu-ai-workforce-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply nagasaribu-ai-workforce-db --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply nagasaribu-ai-workforce-db --remote",
+    "db:seed:agents:local": "wrangler d1 execute nagasaribu-ai-workforce-db --local --file=scripts/seed-agents.sql",
+    "db:seed:agents:remote": "wrangler d1 execute nagasaribu-ai-workforce-db --remote --file=scripts/seed-agents.sql"
   },
   "devDependencies": {
     "esbuild": "^0.27.3",

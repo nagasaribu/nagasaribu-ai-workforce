@@ -16,8 +16,17 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Malay, responsive Operations Control Centre at `/`
 - Free-tier only: no paid services or plan upgrades
 
-See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema, API, security model and
-deployment details.
+## Phase 3 — AI Workforce Activation
+- Six registered agents: SARA, QS AI, Marketing AI, Finance AI, Technical AI, Creative Studio
+- SARA capability-based routing and task orchestration
+- Secure DeepSeek provider adapter with Cloudflare Secrets
+- Mock-only execution when `DEEPSEEK_API_KEY` is absent (no live AI claims)
+- Task results, execution history, audit logging and approval gates
+- Permanent first-admin bootstrap lock and hardened RBAC
+- Real AI activity, mock mode and error visibility in the Malay dashboard
+
+See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API, and
+[`docs/PHASE-3.md`](docs/PHASE-3.md) for activation, orchestration and the live-AI blocker.
 
 ## Initial modules
 - SARA — orchestration and operations
@@ -51,6 +60,7 @@ Open the local URL and complete the one-time administrator setup.
 ## Deploy
 ```bash
 npm run db:migrate:remote
+npm run db:seed:agents:remote
 npm run deploy
 ```
 

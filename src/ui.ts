@@ -323,7 +323,7 @@ export const consoleHtml = String.raw`<!doctype html>
 <dialog id="task-dialog">
   <form id="task-edit-form">
     <h2>Kemas Kini Tugas</h2>
-    <p class="dialog-sub">Kemas kini status, keutamaan atau penugasan.</p>
+    <p class="dialog-sub">Kemas kini status, penugasan, keupayaan atau gerbang kelulusan.</p>
     <input type="hidden" name="id">
     <div class="form-grid">
       <label class="wide">Tajuk<input name="title" type="text" maxlength="200" required></label>
@@ -331,6 +331,9 @@ export const consoleHtml = String.raw`<!doctype html>
       <label>Status<select name="status"></select></label>
       <label>Keutamaan<select name="priority"></select></label>
       <label class="wide">Ejen<select name="assignedAgentId"></select></label>
+      <label>Keupayaan<input name="capability" type="text" maxlength="80" placeholder="contoh: orchestration"></label>
+      <label class="check"><input name="requiresApproval" type="checkbox"> Perlukan kelulusan</label>
+      <label class="wide">Hasil / ralat terakhir<textarea name="lastResult" readonly placeholder="Belum ada pelaksanaan"></textarea></label>
     </div>
     <div class="form-actions">
       <button class="btn" type="button" data-close="task-dialog">Batal</button>
@@ -407,6 +410,18 @@ export const consoleHtml = String.raw`<!doctype html>
   var ENTITY = { task: "Tugas", lead: "Prospek", agent: "Ejen", campaign: "Kempen", other: "Lain-lain" };
   var AGENT_STATUS = { active: "Aktif", paused: "Dijeda", retired: "Bersara" };
   var USER_STATUS = { active: "Aktif", disabled: "Dilumpuhkan" };
+  var EVENT_LABELS = {
+    execution_started: "Pelaksanaan bermula",
+    execution_completed: "Pelaksanaan selesai",
+    execution_failed: "Pelaksanaan gagal",
+    execution_mock: "Mock sahaja",
+    approval_required: "Kelulusan diperlukan",
+    auto_routed: "Auto-arah SARA",
+    routing_failed: "Penghalaan gagal",
+    created: "Dicipta",
+    status_changed: "Status berubah",
+    assigned: "Ditugaskan"
+  };
 
   var navMeta = {
     dashboard: "Ringkasan",
@@ -443,6 +458,15 @@ export const consoleHtml = String.raw`<!doctype html>
     else if (value === "blocked" || value === "pending" || value === "new" || value === "contacted") tone = "amber";
     else if (value === "cancelled" || value === "lost" || value === "rejected" || value === "disabled") tone = "red";
     return '<span class="badge ' + tone + '">' + esc(label(map, value)) + "</span>";
+  }
+
+  function eventBadge(type) {
+    var tone = "blue";
+    if (type === "execution_completed") tone = "green";
+    else if (type === "execution_failed" || type === "routing_failed") tone = "red";
+    else if (type === "approval_required" || type === "execution_mock") tone = "amber";
+    else if (type === "auto_routed") tone = "slate";
+    return '<span class="badge ' + tone + '">' + esc(label(EVENT_LABELS, type)) + "</span>";
   }
 
   function toast(message, isError) {
@@ -571,17 +595,44 @@ export const consoleHtml = String.raw`<!doctype html>
           }).join("")
         : emptyRow(3, "Tiada kelulusan menunggu.");
 
+      var activity = data.recentActivity && data.recentActivity.length
+        ? data.recentActivity.map(function (event) {
+            return "<tr><td><strong>" + esc(event.task_title || "—") + '</strong><div class="sub">' + esc(event.message || "") + "</div></td><td>" + eventBadge(event.event_type) + "</td><td>" + esc(event.actor_name || "Sistem") + "</td><td>" + esc(fmtDate(event.created_at)) + "</td></tr>";
+          }).join("")
+        : emptyRow(4, "Belum ada aktiviti pelaksanaan direkodkan.");
+
+      var errors = data.recentErrors && data.recentErrors.length
+        ? data.recentErrors.map(function (task) {
+            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.last_error || "") + "</div></td><td>" + esc(task.execution_mode || "—") + "</td><td>" + esc(fmtDate(task.last_execution_at)) + "</td></tr>";
+          }).join("")
+        : emptyRow(3, "Tiada ralat direkodkan.");
+
+      var aiLive = data.ai.mode === "live";
+      var aiBadge = aiLive ? '<span class="badge green">Live</span>' : '<span class="badge amber">Mock</span>';
+      var aiWarning = aiLive
+        ? ""
+        : '<div class="login-note">Mod mock aktif: tiada panggilan DeepSeek sebenar. Tetapkan DEEPSEEK_API_KEY sebagai Cloudflare Secret untuk membolehkan pelaksanaan AI sebenar.</div>';
+
       $("view").innerHTML =
-        '<div class="page-head"><div><h2>Gambaran operasi</h2><p>Pantau tugas, ejen, prospek dan kelulusan dalam satu tempat.</p></div></div>' +
+        '<div class="page-head"><div><h2>Gambaran operasi</h2><p>Pantau tugas, ejen, prospek, kelulusan dan pelaksanaan AI dalam satu tempat.</p></div></div>' +
         '<div class="stats">' +
           statCard("Tugas Aktif", data.tasks.active, data.tasks.total + " jumlah tugasan") +
           statCard("Ejen Aktif", data.agents.active, data.agents.total + " ejen berdaftar") +
-          statCard("Prospek Baru", data.leads.new, data.leads.total + " jumlah prospek") +
-          statCard("Kelulusan Menunggu", data.approvals.pending, data.approvals.total + " jumlah permohonan") +
+          statCard("Pelaksanaan AI", data.execution.completed, data.execution.failed + " gagal · " + data.execution.mock + " mock") +
+          statCard("Kelulusan Menunggu", data.approvals.pending, data.execution.approvalBlocked + " disekat kelulusan") +
         "</div>" +
         '<div class="grid-2">' +
-          '<div class="panel"><div class="panel-head"><h2>Tugasan Terkini</h2><button class="btn btn-sm" type="button" data-action="nav" data-tab="tasks">Lihat semua</button></div><div class="table-wrap"><table><thead><tr><th>Tugas</th><th>Status</th><th>Dicipta</th></tr></thead><tbody>' + recent + "</tbody></table></div></div>" +
+          '<div class="panel"><div class="panel-head"><h2>Enjin AI</h2>' + aiBadge + '</div><div class="panel-body">' +
+            '<p class="small" style="margin:0 0 8px">Model: <strong>' + esc(data.ai.model) + '</strong> · Kunci API: ' + (data.ai.configured ? "dikonfigurasikan" : "tiada") + '</p>' +
+            '<p class="small" style="margin:0">Pelaksanaan bermula: ' + esc(data.execution.started) + ' · Selesai: ' + esc(data.execution.completed) + ' · Gagal: ' + esc(data.execution.failed) + ' · Mock: ' + esc(data.execution.mock) + '</p>' +
+            aiWarning +
+          '</div></div>' +
           '<div class="panel"><div class="panel-head"><h2>Kelulusan Menunggu</h2><button class="btn btn-sm" type="button" data-action="nav" data-tab="approvals">Lihat semua</button></div><div class="table-wrap"><table><thead><tr><th>Permohonan</th><th>Pemohon</th><th>Tarikh</th></tr></thead><tbody>' + approvals + "</tbody></table></div></div>" +
+        "</div>" +
+        '<div class="panel"><div class="panel-head"><h2>Aktiviti Operasi</h2><button class="btn btn-sm" type="button" data-action="nav" data-tab="tasks">Lihat tugas</button></div><div class="table-wrap"><table><thead><tr><th>Tugas</th><th>Peristiwa</th><th>Aktor</th><th>Masa</th></tr></thead><tbody>' + activity + "</tbody></table></div></div>" +
+        '<div class="grid-2">' +
+          '<div class="panel"><div class="panel-head"><h2>Tugasan Terkini</h2></div><div class="table-wrap"><table><thead><tr><th>Tugas</th><th>Status</th><th>Dicipta</th></tr></thead><tbody>' + recent + "</tbody></table></div></div>" +
+          '<div class="panel"><div class="panel-head"><h2>Ralat &amp; Sekatan</h2></div><div class="table-wrap"><table><thead><tr><th>Tugas</th><th>Mod</th><th>Masa</th></tr></thead><tbody>' + errors + "</tbody></table></div></div>" +
         "</div>";
     });
   };
@@ -591,26 +642,47 @@ export const consoleHtml = String.raw`<!doctype html>
       state.tasks = results[0].tasks;
       state.agents = results[1].agents;
 
-      var agentOptions = '<option value="">Belum ditugaskan</option>' + state.agents.map(function (agent) {
+      var agentOptions = '<option value="">Auto-arah melalui SARA</option>' + state.agents.map(function (agent) {
         return '<option value="' + esc(agent.id) + '">' + esc(agent.name) + "</option>";
       }).join("");
 
       var rows = state.tasks.length
         ? state.tasks.map(function (task) {
-            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.description || "Tiada keterangan") + "</div></td><td>" + badge(task.status, TASK_STATUS) + "</td><td>" + badge(task.priority, PRIORITY) + "</td><td>" + esc(task.assigned_agent_name || task.assigned_user_name || "—") + '</td><td class="hide-sm">' + esc(fmtDate(task.created_at)) + '</td><td><button class="btn btn-sm" type="button" data-action="task-edit" data-id="' + esc(task.id) + '">Kemas Kini</button></td></tr>';
+            var meta = {};
+            try { meta = JSON.parse(task.metadata || "{}"); } catch (ignore) { meta = {}; }
+            var needsApproval = meta.requiresApproval === true;
+            var approvalCell = task.approval_status
+              ? badge(task.approval_status, APPROVAL_STATUS)
+              : (needsApproval ? '<span class="badge amber">Belum dimohon</span>' : '<span class="muted">—</span>');
+            var resultCell = task.last_error
+              ? '<span class="badge red">Ralat</span><div class="sub">' + esc(String(task.last_error).slice(0, 120)) + "</div>"
+              : (task.result
+                  ? '<div class="sub">' + esc(String(task.result).slice(0, 160)) + (String(task.result).length > 160 ? "…" : "") + "</div>"
+                  : '<span class="muted">—</span>');
+            var execBadge = task.execution_mode
+              ? ' <span class="badge ' + (task.execution_mode === "live" ? "green" : "amber") + '">' + esc(task.execution_mode) + "</span>"
+              : "";
+            var actions = '<button class="btn btn-sm btn-primary" type="button" data-action="execute-task" data-id="' + esc(task.id) + '">Jalankan</button>';
+            if (needsApproval && task.approval_status !== "approved") {
+              actions += '<button class="btn btn-sm" type="button" data-action="request-approval" data-id="' + esc(task.id) + '">Mohon Kelulusan</button>';
+            }
+            actions += '<button class="btn btn-sm" type="button" data-action="task-edit" data-id="' + esc(task.id) + '">Kemas Kini</button>';
+            return "<tr><td><strong>" + esc(task.title) + '</strong><div class="sub">' + esc(task.description || "Tiada keterangan") + (meta.capability ? " · " + esc(meta.capability) : "") + "</div></td><td>" + badge(task.status, TASK_STATUS) + execBadge + "</td><td>" + esc(task.assigned_agent_name || task.assigned_user_name || "SARA (auto)") + "</td><td>" + resultCell + '</td><td class="hide-sm">' + approvalCell + '</td><td class="hide-sm">' + esc(fmtDate(task.created_at)) + '</td><td><div class="card-actions" style="margin:0">' + actions + "</div></td></tr>";
           }).join("")
-        : emptyRow(6, "Belum ada tugasan. Cipta tugasan pertama anda.");
+        : emptyRow(7, "Belum ada tugasan. Cipta tugasan pertama anda.");
 
       $("view").innerHTML =
-        '<div class="page-head"><div><h2>Pengurusan tugas</h2><p>Cipta, tugaskan dan jejak status kerja pasukan.</p></div></div>' +
+        '<div class="page-head"><div><h2>Pengurusan tugas</h2><p>Cipta, tugaskan, jalankan dan jejak hasil kerja pasukan AI.</p></div></div>' +
         '<details class="panel"><summary>Cipta tugasan baharu</summary><div class="panel-body"><form id="task-form"><div class="form-grid">' +
           '<label class="wide">Tajuk<input name="title" type="text" maxlength="200" required placeholder="Contoh: Sediakan laporan mingguan"></label>' +
           '<label class="wide">Keterangan<textarea name="description" maxlength="5000" placeholder="Skop dan hasil dijangka"></textarea></label>' +
           '<label>Keutamaan<select name="priority">' + optionList(PRIORITY, "normal") + "</select></label>" +
           '<label>Ejen<select name="assignedAgentId">' + agentOptions + "</select></label>" +
+          '<label>Keupayaan<input name="capability" type="text" maxlength="80" placeholder="contoh: financial_operations"></label>' +
           '<label>Tarikh akhir<input name="dueAt" type="date"></label>' +
+          '<label class="check wide"><input name="requiresApproval" type="checkbox"> Perlukan kelulusan manusia sebelum pelaksanaan</label>' +
         '</div><div class="form-actions"><button class="btn btn-primary" type="submit">Cipta Tugasan</button></div></form></div></details>' +
-        '<div class="panel"><div class="panel-head"><h2>Senarai Tugas</h2><span class="muted small">' + state.tasks.length + " tugasan</span></div><div class=\"table-wrap\"><table><thead><tr><th>Tugas</th><th>Status</th><th>Keutamaan</th><th>Ditugaskan</th><th class=\"hide-sm\">Dicipta</th><th></th></tr></thead><tbody>" + rows + "</tbody></table></div></div>";
+        '<div class="panel"><div class="panel-head"><h2>Senarai Tugas</h2><span class="muted small">' + state.tasks.length + " tugasan</span></div><div class=\"table-wrap\"><table><thead><tr><th>Tugas</th><th>Status</th><th>Ejen</th><th>Hasil</th><th class=\"hide-sm\">Kelulusan</th><th class=\"hide-sm\">Dicipta</th><th>Tindakan</th></tr></thead><tbody>" + rows + "</tbody></table></div></div>";
     });
   };
 
@@ -621,11 +693,14 @@ export const consoleHtml = String.raw`<!doctype html>
         ? state.agents.map(function (agent) {
             var capabilities = [];
             try { capabilities = JSON.parse(agent.capabilities || "[]"); } catch (ignore) { capabilities = []; }
+            var config = {};
+            try { config = JSON.parse(agent.config || "{}"); } catch (ignore) { config = {}; }
             var chips = capabilities.length
               ? capabilities.map(function (item) { return '<span class="chip">' + esc(item) + "</span>"; }).join("")
               : '<span class="chip">Tiada keupayaan dinyatakan</span>';
             var next = agent.status === "active" ? "paused" : "active";
-            return '<div class="card"><h3>' + esc(agent.name) + "</h3><div class=\"meta\">" + esc(agent.kind || "general") + " · " + badge(agent.status, AGENT_STATUS) + "</div><p class=\"small\" style=\"margin:10px 0 0\">" + esc(agent.description || "Tiada keterangan.") + '</p><div class="chips">' + chips + '</div><div class="card-actions"><button class="btn btn-sm" type="button" data-action="agent-status" data-id="' + esc(agent.id) + '" data-status="' + esc(next) + '">' + (next === "paused" ? "Jeda Ejen" : "Aktifkan Ejen") + "</button></div></div>";
+            var approvalBadge = config.requiresApproval ? ' <span class="badge amber">Perlu kelulusan</span>' : "";
+            return '<div class="card"><h3>' + esc(agent.name) + '</h3><div class="meta">' + esc(agent.kind || "general") + " · " + badge(agent.status, AGENT_STATUS) + approvalBadge + '</div><p class="small" style="margin:10px 0 0">' + esc(agent.description || "Tiada keterangan.") + '</p><div class="chips">' + chips + '</div><div class="meta" style="margin-top:10px">Model: ' + esc(config.model || "deepseek-chat") + " · " + esc(agent.active_tasks || 0) + ' tugas aktif</div><div class="card-actions"><button class="btn btn-sm" type="button" data-action="agent-status" data-id="' + esc(agent.id) + '" data-status="' + esc(next) + '">' + (next === "paused" ? "Jeda Ejen" : "Aktifkan Ejen") + "</button></div></div>";
           }).join("")
         : '<div class="empty">Belum ada ejen berdaftar.</div>';
 
@@ -746,9 +821,15 @@ export const consoleHtml = String.raw`<!doctype html>
     form.elements.description.value = task.description || "";
     form.elements.status.innerHTML = optionList(TASK_STATUS, task.status);
     form.elements.priority.innerHTML = optionList(PRIORITY, task.priority);
-    form.elements.assignedAgentId.innerHTML = '<option value="">Belum ditugaskan</option>' + state.agents.map(function (agent) {
+    form.elements.assignedAgentId.innerHTML = '<option value="">Auto-arah melalui SARA</option>' + state.agents.map(function (agent) {
       return '<option value="' + esc(agent.id) + '"' + (agent.id === task.assigned_agent_id ? " selected" : "") + ">" + esc(agent.name) + "</option>";
     }).join("");
+    var meta = {};
+    try { meta = JSON.parse(task.metadata || "{}"); } catch (ignore) { meta = {}; }
+    form.elements.capability.value = meta.capability || "";
+    form.elements.requiresApproval.checked = meta.requiresApproval === true;
+    var lastResult = task.last_error ? "RALAT: " + task.last_error : (task.result || "");
+    form.elements.lastResult.value = lastResult;
     $("task-dialog").showModal();
   }
 
@@ -826,6 +907,8 @@ export const consoleHtml = String.raw`<!doctype html>
           description: taskData.get("description"),
           priority: taskData.get("priority"),
           assignedAgentId: taskData.get("assignedAgentId") || null,
+          capability: taskData.get("capability"),
+          requiresApproval: taskData.get("requiresApproval") === "on",
           dueAt: taskData.get("dueAt") || null
         }
       }).then(function () {
@@ -845,7 +928,9 @@ export const consoleHtml = String.raw`<!doctype html>
           description: taskEdit.get("description"),
           status: taskEdit.get("status"),
           priority: taskEdit.get("priority"),
-          assignedAgentId: taskEdit.get("assignedAgentId") || null
+          assignedAgentId: taskEdit.get("assignedAgentId") || null,
+          capability: taskEdit.get("capability"),
+          requiresApproval: taskEdit.get("requiresApproval") === "on"
         }
       }).then(function () {
         $("task-dialog").close();
@@ -998,6 +1083,45 @@ export const consoleHtml = String.raw`<!doctype html>
 
     if (action === "task-edit") {
       openTaskDialog(target.getAttribute("data-id"));
+      return;
+    }
+
+    if (action === "execute-task") {
+      var executeId = target.getAttribute("data-id");
+      target.disabled = true;
+      target.textContent = "Menjalankan…";
+      api("/api/tasks/" + encodeURIComponent(executeId) + "/execute", { method: "POST", body: {} })
+        .then(function (data) {
+          if (data.execution && data.execution.live) {
+            toast("Pelaksanaan AI selesai.");
+          } else {
+            toast("Mod mock: tiada panggilan AI sebenar. Hasil disimpan sebagai draf dan tugas ditanda terhalang.");
+          }
+          switchTab("tasks");
+        })
+        .catch(function (error) {
+          toast(error.message, true);
+          switchTab("tasks");
+        });
+      return;
+    }
+
+    if (action === "request-approval") {
+      var approvalTaskId = target.getAttribute("data-id");
+      var approvalTask = state.tasks.filter(function (item) { return item.id === approvalTaskId; })[0];
+      if (!approvalTask) return;
+      api("/api/approvals", {
+        method: "POST",
+        body: {
+          entityType: "task",
+          entityId: approvalTask.id,
+          title: ("Kelulusan pelaksanaan: " + approvalTask.title).slice(0, 200),
+          description: approvalTask.description || "Permohonan kelulusan untuk pelaksanaan tugas."
+        }
+      }).then(function () {
+        toast("Permohonan kelulusan dihantar.");
+        switchTab("approvals");
+      }).catch(function (error) { toast(error.message, true); });
       return;
     }
 

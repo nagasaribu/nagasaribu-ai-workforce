@@ -1,6 +1,6 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 
@@ -38,15 +38,18 @@ before(async () => {
   });
 
   const db = await mf.getD1Database("DB");
-  const migration = await readFile("migrations/0001_initial_schema.sql", "utf8");
-  const statements = migration
-    .split("\n")
-    .filter((line) => !line.trim().startsWith("--"))
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
-  for (const statement of statements) await db.prepare(statement).run();
+  const migrationFiles = (await readdir("migrations")).filter((file) => file.endsWith(".sql")).sort();
+  for (const file of migrationFiles) {
+    const migration = await readFile(`migrations/${file}`, "utf8");
+    const statements = migration
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n")
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    for (const statement of statements) await db.prepare(statement).run();
+  }
 });
 
 after(async () => {
@@ -103,6 +106,7 @@ test("health reports an operational phase 2 service with a working database", as
   assert.equal(response.data.phase, 2);
   assert.equal(response.data.checks.database, "ok");
   assert.equal(response.data.checks.auth, "configured");
+  assert.equal(response.data.checks.ai, "mock");
 });
 
 test("root serves the Malay Operations Control Centre with security headers", async () => {
@@ -170,6 +174,12 @@ test("first-run setup creates the initial administrator and signs them in", asyn
   const cookie = response.headers.get("set-cookie") ?? "";
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
+
+  const db = await mf.getD1Database("DB");
+  const flag = await db
+    .prepare("SELECT value FROM system_settings WHERE key = 'bootstrap_completed'")
+    .first();
+  assert.equal(flag.value, "true", "bootstrap must be marked complete");
 });
 
 test("first-run setup cannot be repeated", async () => {
@@ -243,6 +253,14 @@ test("agents can be registered, listed and paused", async () => {
   });
   assert.equal(paused.status, 200);
   assert.equal(paused.data.agent.status, "paused");
+
+  const reactivated = await call(`/api/agents/${agentId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { status: "active" },
+  });
+  assert.equal(reactivated.status, 200);
+  assert.equal(reactivated.data.agent.status, "active");
 });
 
 test("tasks can be created, assigned, tracked and completed with events", async () => {
@@ -371,6 +389,105 @@ test("approval workflow records a decision once", async () => {
   assert.equal(again.status, 409);
 });
 
+test("task execution runs in mock mode and records events and audit logs", async () => {
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      title: "Jalankan analisis kos",
+      description: "Sediakan analisis kos awal untuk projek contoh.",
+      capability: "penyelidikan",
+      assignedAgentId: agentId,
+    },
+  });
+  assert.equal(created.status, 201);
+  const executionTaskId = created.data.task.id;
+
+  const executed = await call(`/api/tasks/${executionTaskId}/execute`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(executed.status, 200);
+  assert.equal(executed.data.execution.mode, "mock");
+  assert.equal(executed.data.execution.live, false);
+  assert.equal(executed.data.task.status, "blocked");
+  assert.match(executed.data.task.result, /MOD MOCK/);
+  assert.match(executed.data.task.last_error, /Mod mock/);
+
+  const detail = await call(`/api/tasks/${executionTaskId}`, { token: adminToken });
+  const eventTypes = detail.data.events.map((event) => event.event_type);
+  assert.ok(eventTypes.includes("execution_started"));
+  assert.ok(eventTypes.includes("execution_mock"));
+
+  const ai = await call("/api/ai/status", { token: adminToken });
+  assert.equal(ai.status, 200);
+  assert.equal(ai.data.provider.mode, "mock");
+  assert.equal(ai.data.provider.configured, false);
+  assert.equal(ai.data.provider.liveExecutionEnabled, false);
+
+  const dashboard = await call("/api/dashboard", { token: adminToken });
+  assert.equal(dashboard.status, 200);
+  assert.equal(dashboard.data.ai.mode, "mock");
+  assert.ok(dashboard.data.execution.started >= 1);
+  assert.ok(dashboard.data.execution.mock >= 1);
+  assert.ok(dashboard.data.recentActivity.length >= 1);
+  assert.ok(dashboard.data.recentErrors.some((task) => task.id === executionTaskId));
+});
+
+test("risky tasks require an approved gate before execution", async () => {
+  const created = await call("/api/tasks", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      title: "Terbitkan kempen luaran",
+      description: "Kempen ini memerlukan kelulusan manusia.",
+      assignedAgentId: agentId,
+      requiresApproval: true,
+    },
+  });
+  assert.equal(created.status, 201);
+  const gatedTaskId = created.data.task.id;
+
+  const blocked = await call(`/api/tasks/${gatedTaskId}/execute`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.data.error.code, "approval_required");
+
+  const detail = await call(`/api/tasks/${gatedTaskId}`, { token: adminToken });
+  assert.ok(detail.data.events.some((event) => event.event_type === "approval_required"));
+
+  const approval = await call("/api/approvals", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      entityType: "task",
+      entityId: gatedTaskId,
+      title: "Kelulusan kempen luaran",
+      description: "Sahkan pelaksanaan kempen.",
+    },
+  });
+  assert.equal(approval.status, 201);
+
+  const decision = await call(`/api/approvals/${approval.data.approval.id}/decision`, {
+    method: "POST",
+    token: adminToken,
+    body: { decision: "approved", note: "Diluluskan untuk ujian." },
+  });
+  assert.equal(decision.status, 200);
+
+  const executed = await call(`/api/tasks/${gatedTaskId}/execute`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  assert.equal(executed.status, 200);
+  assert.equal(executed.data.execution.mode, "mock");
+});
+
 test("role-based access control separates agents, viewers and administrators", async () => {
   const agentUser = await call("/api/users", {
     method: "POST",
@@ -383,6 +500,7 @@ test("role-based access control separates agents, viewers and administrators", a
     },
   });
   assert.equal(agentUser.status, 201);
+  const agentUserId = agentUser.data.user.id;
 
   const viewerUser = await call("/api/users", {
     method: "POST",
@@ -418,12 +536,34 @@ test("role-based access control separates agents, viewers and administrators", a
   const agentUsers = await call("/api/users", { token: agentToken });
   assert.equal(agentUsers.status, 403);
 
+  const agentEscalation = await call(`/api/users/${agentUserId}`, {
+    method: "PATCH",
+    token: agentToken,
+    body: { role: "admin" },
+  });
+  assert.equal(agentEscalation.status, 403, "agents cannot change their own role");
+
+  const agentAdminPatch = await call(`/api/users/${adminId}`, {
+    method: "PATCH",
+    token: agentToken,
+    body: { role: "viewer" },
+  });
+  assert.equal(agentAdminPatch.status, 403, "agents cannot modify administrators");
+
   const agentDecision = await call(`/api/approvals/${approvalId}/decision`, {
     method: "POST",
     token: agentToken,
     body: { decision: "rejected" },
   });
   assert.equal(agentDecision.status, 403);
+
+  const agentExecution = await call(`/api/tasks/${agentTask.data.task.id}/execute`, {
+    method: "POST",
+    token: agentToken,
+    body: {},
+  });
+  assert.equal(agentExecution.status, 200);
+  assert.equal(agentExecution.data.execution.mode, "mock");
 
   const viewerDashboard = await call("/api/dashboard", { token: viewerToken });
   assert.equal(viewerDashboard.status, 200);
@@ -437,6 +577,50 @@ test("role-based access control separates agents, viewers and administrators", a
 
   const viewerLeads = await call("/api/leads", { token: viewerToken });
   assert.equal(viewerLeads.status, 403);
+
+  const viewerAudit = await call("/api/audit-logs", { token: viewerToken });
+  assert.equal(viewerAudit.status, 403);
+
+  const viewerExecution = await call(`/api/tasks/${agentTask.data.task.id}/execute`, {
+    method: "POST",
+    token: viewerToken,
+    body: {},
+  });
+  assert.equal(viewerExecution.status, 403);
+
+  const selfDemote = await call(`/api/users/${adminId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { role: "viewer" },
+  });
+  assert.equal(selfDemote.status, 400, "administrators cannot demote themselves");
+
+  const selfDisable = await call(`/api/users/${adminId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { status: "disabled" },
+  });
+  assert.equal(selfDisable.status, 400, "administrators cannot disable themselves");
+
+  const disableAgent = await call(`/api/users/${agentUserId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { status: "disabled" },
+  });
+  assert.equal(disableAgent.status, 200);
+
+  const disabledSession = await call("/api/dashboard", { token: agentToken });
+  assert.equal(disabledSession.status, 401, "disabled users lose session access");
+
+  const enableAgent = await call(`/api/users/${agentUserId}`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { status: "active" },
+  });
+  assert.equal(enableAgent.status, 200);
+
+  const restoredSession = await call("/api/dashboard", { token: agentToken });
+  assert.equal(restoredSession.status, 200);
 });
 
 test("users and audit logs are protected and never expose password hashes", async () => {
@@ -456,8 +640,11 @@ test("users and audit logs are protected and never expose password hashes", asyn
   for (const action of [
     "auth.setup",
     "auth.login",
+    "auth.login_failed",
     "agent.create",
     "task.create",
+    "task.execute",
+    "task.execute_blocked",
     "lead.create",
     "approval.approved",
     "user.create",
@@ -493,4 +680,28 @@ test("logout clears the session cookie", async () => {
   const cookie = response.headers.get("set-cookie") ?? "";
   assert.match(cookie, /occ_session=;/);
   assert.match(cookie, /Max-Age=0/);
+});
+
+test("bootstrap stays permanently closed even after every user is removed", async () => {
+  const db = await mf.getD1Database("DB");
+  const flag = await db
+    .prepare("SELECT value FROM system_settings WHERE key = 'bootstrap_completed'")
+    .first();
+  assert.equal(flag.value, "true");
+
+  await db.prepare("DELETE FROM users").run();
+
+  const response = await call("/api/auth/setup", {
+    method: "POST",
+    body: {
+      name: "Penyusup",
+      email: "reopen@example.test",
+      password: "AnotherPassword123!",
+    },
+  });
+  assert.equal(response.status, 409);
+  assert.equal(response.data.error.code, "already_initialized");
+
+  const me = await call("/api/auth/me");
+  assert.equal(me.data.needsSetup, false, "setup must not reopen when users are removed");
 });

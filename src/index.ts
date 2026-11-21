@@ -10,6 +10,14 @@ import {
 } from "./auth.ts";
 import { consoleHtml } from "./ui.ts";
 import type { AuthUser, Env } from "./types.ts";
+import { getProviderStatus, ProviderError } from "./providers/deepseek.ts";
+import {
+  executeAgent,
+  parseAgentConfig,
+  parseCapabilities,
+  parseJsonObject,
+  selectAgentForTask,
+} from "./orchestrator.ts";
 
 const SERVICE = "nagasaribu-ai-workforce";
 const PHASE = 2;
@@ -99,15 +107,6 @@ function nowIso(): string {
 
 function newId(): string {
   return crypto.randomUUID();
-}
-
-function parseJson<T>(value: unknown, fallback: T): T {
-  if (typeof value !== "string" || !value) return fallback;
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
-  }
 }
 
 function asInt(value: string | null, fallback: number, min: number, max: number): number {
@@ -312,6 +311,22 @@ async function userCount(env: Env): Promise<number> {
   return Number(row?.count ?? 0);
 }
 
+async function getSetting(env: Env, key: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = ?")
+    .bind(key)
+    .first<{ value: string }>();
+  return row?.value ?? null;
+}
+
+async function setSetting(env: Env, key: string, value: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  )
+    .bind(key, value, nowIso())
+    .run();
+}
+
 async function findUserByEmail(env: Env, address: string): Promise<
   | (AuthUser & { password_hash: string })
   | null
@@ -332,7 +347,12 @@ function publicUser(user: AuthUser): Record<string, unknown> {
 const TASK_SELECT = `
   SELECT t.id, t.title, t.description, t.status, t.priority,
          t.assigned_agent_id, t.assigned_user_id, t.created_by,
-         t.due_at, t.metadata, t.created_at, t.updated_at, t.completed_at,
+         t.due_at, t.metadata, t.result, t.last_error, t.last_execution_at,
+         t.execution_mode, t.execution_count,
+         t.created_at, t.updated_at, t.completed_at,
+         (SELECT ap.status FROM approvals ap
+          WHERE ap.entity_type = 'task' AND ap.entity_id = t.id
+          ORDER BY ap.created_at DESC LIMIT 1) AS approval_status,
          a.name AS assigned_agent_name, u.name AS assigned_user_name, c.name AS created_by_name
   FROM tasks t
   LEFT JOIN agent_registry a ON a.id = t.assigned_agent_id
@@ -383,10 +403,11 @@ async function handleAuth(request: Request, env: Env, path: string): Promise<Res
   if (path === "/api/auth/me" && method === "GET") {
     const user = await currentUser(request, env);
     if (user) return json({ authenticated: true, user: publicUser(user) });
-    const count = env.SESSION_SECRET ? await userCount(env) : 0;
+    const bootstrap = env.SESSION_SECRET ? await getSetting(env, "bootstrap_completed") : null;
+    const count = env.SESSION_SECRET && bootstrap !== "true" ? await userCount(env) : 0;
     return json({
       authenticated: false,
-      needsSetup: count === 0,
+      needsSetup: bootstrap !== "true" && count === 0,
       configured: Boolean(env.SESSION_SECRET),
     });
   }
@@ -396,6 +417,10 @@ async function handleAuth(request: Request, env: Env, path: string): Promise<Res
       throw new HttpError(503, "Pengesahan belum dikonfigurasikan.", "auth_not_configured");
     }
     rateLimit(`setup:${clientIp(request) ?? "unknown"}`);
+
+    if ((await getSetting(env, "bootstrap_completed")) === "true") {
+      throw new HttpError(409, "Penyediaan awal telah selesai. Sila log masuk.", "already_initialized");
+    }
 
     const body = await readJson(request);
     const name = requiredStr(body, "name", 120);
@@ -410,15 +435,18 @@ async function handleAuth(request: Request, env: Env, path: string): Promise<Res
     const result = await env.DB.prepare(
       `INSERT INTO users (id, email, name, password_hash, role_id)
        SELECT ?, ?, ?, ?, 'role_admin'
-       WHERE NOT EXISTS (SELECT 1 FROM users)`,
+       WHERE NOT EXISTS (SELECT 1 FROM users)
+         AND NOT EXISTS (SELECT 1 FROM system_settings WHERE key = 'bootstrap_completed' AND value = 'true')`,
     )
       .bind(id, address, name, hash)
       .run();
 
     if (!result.meta.changes) {
+      await setSetting(env, "bootstrap_completed", "true");
       throw new HttpError(409, "Penyediaan awal telah selesai. Sila log masuk.", "already_initialized");
     }
 
+    await setSetting(env, "bootstrap_completed", "true");
     clearRateLimit(`setup:${clientIp(request) ?? "unknown"}`);
     await audit(env, request, id, "auth.setup", "user", id, { role: "admin" });
     const user: AuthUser = { id, email: address, name, role: "admin", status: "active" };
@@ -473,31 +501,72 @@ async function handleAuth(request: Request, env: Env, path: string): Promise<Res
 }
 
 async function handleDashboard(env: Env): Promise<Response> {
-  const [taskStats, agentStats, leadStats, approvalStats, recentTasks, pendingApprovals] =
-    await Promise.all([
-      env.DB.prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status IN ('pending','assigned','in_progress','blocked') THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
-         FROM tasks`,
-      ).first<{ total: number; active: number; completed: number }>(),
-      env.DB.prepare(
-        `SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, COUNT(*) AS total
-         FROM agent_registry`,
-      ).first<{ active: number; total: number }>(),
-      env.DB.prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS new,
-                SUM(CASE WHEN status = 'qualified' THEN 1 ELSE 0 END) AS qualified
-         FROM leads`,
-      ).first<{ total: number; new: number; qualified: number }>(),
-      env.DB.prepare(
-        `SELECT SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending, COUNT(*) AS total FROM approvals`,
-      ).first<{ pending: number; total: number }>(),
-      env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC LIMIT 5`).all<Record<string, unknown>>(),
-      env.DB.prepare(`${APPROVAL_SELECT} WHERE ap.status = 'pending' ORDER BY ap.created_at DESC LIMIT 5`)
-        .all<Record<string, unknown>>(),
-    ]);
+  const [
+    taskStats,
+    agentStats,
+    leadStats,
+    approvalStats,
+    recentTasks,
+    pendingApprovals,
+    executionStats,
+    recentActivity,
+    recentErrors,
+  ] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status IN ('pending','assigned','in_progress','blocked') THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
+       FROM tasks`,
+    ).first<{ total: number; active: number; completed: number }>(),
+    env.DB.prepare(
+      `SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, COUNT(*) AS total
+       FROM agent_registry`,
+    ).first<{ active: number; total: number }>(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS new,
+              SUM(CASE WHEN status = 'qualified' THEN 1 ELSE 0 END) AS qualified
+       FROM leads`,
+    ).first<{ total: number; new: number; qualified: number }>(),
+    env.DB.prepare(
+      `SELECT SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending, COUNT(*) AS total FROM approvals`,
+    ).first<{ pending: number; total: number }>(),
+    env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC LIMIT 5`).all<Record<string, unknown>>(),
+    env.DB.prepare(`${APPROVAL_SELECT} WHERE ap.status = 'pending' ORDER BY ap.created_at DESC LIMIT 5`)
+      .all<Record<string, unknown>>(),
+    env.DB.prepare(
+      `SELECT
+         SUM(CASE WHEN event_type = 'execution_started' THEN 1 ELSE 0 END) AS started,
+         SUM(CASE WHEN event_type = 'execution_completed' THEN 1 ELSE 0 END) AS completed,
+         SUM(CASE WHEN event_type = 'execution_failed' THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN event_type = 'execution_mock' THEN 1 ELSE 0 END) AS mock,
+         SUM(CASE WHEN event_type = 'approval_required' THEN 1 ELSE 0 END) AS approval_blocked
+       FROM task_events
+       WHERE event_type IN ('execution_started','execution_completed','execution_failed','execution_mock','approval_required')`,
+    ).first<{
+      started: number;
+      completed: number;
+      failed: number;
+      mock: number;
+      approval_blocked: number;
+    }>(),
+    env.DB.prepare(
+      `SELECT e.id, e.event_type, e.message, e.created_at,
+              t.id AS task_id, t.title AS task_title, u.name AS actor_name
+       FROM task_events e
+       JOIN tasks t ON t.id = e.task_id
+       LEFT JOIN users u ON u.id = e.actor_user_id
+       WHERE e.event_type IN ('execution_started','execution_completed','execution_failed','execution_mock','approval_required','auto_routed','routing_failed')
+       ORDER BY e.created_at DESC LIMIT 12`,
+    ).all<Record<string, unknown>>(),
+    env.DB.prepare(
+      `SELECT id, title, last_error, last_execution_at, execution_mode
+       FROM tasks WHERE last_error <> ''
+       ORDER BY COALESCE(last_execution_at, updated_at) DESC LIMIT 8`,
+    ).all<Record<string, unknown>>(),
+  ]);
+
+  const ai = getProviderStatus(env);
 
   return json({
     tasks: {
@@ -512,9 +581,242 @@ async function handleDashboard(env: Env): Promise<Response> {
       qualified: Number(leadStats?.qualified ?? 0),
     },
     approvals: { pending: Number(approvalStats?.pending ?? 0), total: Number(approvalStats?.total ?? 0) },
+    execution: {
+      started: Number(executionStats?.started ?? 0),
+      completed: Number(executionStats?.completed ?? 0),
+      failed: Number(executionStats?.failed ?? 0),
+      mock: Number(executionStats?.mock ?? 0),
+      approvalBlocked: Number(executionStats?.approval_blocked ?? 0),
+    },
+    ai: {
+      mode: ai.mode,
+      configured: ai.configured,
+      model: ai.model,
+      reason: ai.reason ?? null,
+    },
     recentTasks: recentTasks.results,
     pendingApprovals: pendingApprovals.results,
+    recentActivity: recentActivity.results,
+    recentErrors: recentErrors.results,
   });
+}
+
+async function executeTask(
+  request: Request,
+  env: Env,
+  user: AuthUser,
+  task: Record<string, unknown>,
+  id: string,
+): Promise<Response> {
+  requirePermission(user, "tasks.write");
+  if (task.status === "cancelled") {
+    throw new HttpError(409, "Tugas yang dibatalkan tidak boleh dilaksanakan.", "task_cancelled");
+  }
+
+  const selection = await selectAgentForTask(env, task);
+  if (!selection) {
+    await addTaskEvent(env, id, "routing_failed", user.id, "Tiada ejen aktif untuk tugas ini.");
+    await audit(env, request, user.id, "task.execute_blocked", "task", id, { reason: "no_agent" });
+    throw new HttpError(409, "Tiada ejen aktif tersedia untuk tugas ini.", "no_agent");
+  }
+
+  const agent = selection.agent;
+  if (agent.status !== "active") {
+    await addTaskEvent(env, id, "routing_failed", user.id, `Ejen ${agent.name} tidak aktif.`);
+    await audit(env, request, user.id, "task.execute_blocked", "task", id, {
+      reason: "agent_inactive",
+      agentId: agent.id,
+    });
+    throw new HttpError(409, `Ejen ${agent.name} tidak aktif. Sila tugaskan ejen lain.`, "agent_inactive");
+  }
+
+  const metadata = parseJsonObject(task.metadata);
+  const agentConfig = parseAgentConfig(agent);
+  const requiresApproval =
+    metadata.requiresApproval === true ||
+    agentConfig.requiresApproval === true ||
+    parseCapabilities(agent).includes("external_action");
+
+  if (requiresApproval) {
+    const approved = await env.DB.prepare(
+      `SELECT id FROM approvals
+       WHERE entity_type = 'task' AND entity_id = ? AND status = 'approved'
+       ORDER BY decided_at DESC LIMIT 1`,
+    )
+      .bind(id)
+      .first<{ id: string }>();
+    if (!approved) {
+      await addTaskEvent(
+        env,
+        id,
+        "approval_required",
+        user.id,
+        "Pelaksanaan disekat sehingga kelulusan diluluskan.",
+        task.status as string,
+        task.status as string,
+        { agentId: agent.id },
+      );
+      await audit(env, request, user.id, "task.execute_blocked", "task", id, {
+        reason: "approval_required",
+        agentId: agent.id,
+      });
+      throw new HttpError(
+        409,
+        "Kelulusan diperlukan sebelum tugas ini boleh dilaksanakan.",
+        "approval_required",
+      );
+    }
+  }
+
+  if (selection.reason !== "assigned") {
+    await env.DB.prepare(
+      `UPDATE tasks
+       SET assigned_agent_id = ?, status = CASE WHEN status = 'pending' THEN 'assigned' ELSE status END, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(agent.id, nowIso(), id)
+      .run();
+    await addTaskEvent(
+      env,
+      id,
+      "auto_routed",
+      user.id,
+      `SARA menugaskan tugas kepada ${agent.name}.`,
+      task.status as string,
+      task.status === "pending" ? "assigned" : (task.status as string),
+      { agentId: agent.id, reason: selection.reason },
+    );
+    await audit(env, request, user.id, "task.auto_route", "task", id, {
+      agentId: agent.id,
+      reason: selection.reason,
+    });
+  }
+
+  const provider = getProviderStatus(env);
+  const startedAt = nowIso();
+  await env.DB.prepare(
+    `UPDATE tasks
+     SET status = 'in_progress', last_error = '', last_execution_at = ?, execution_mode = ?,
+         execution_count = execution_count + 1, completed_at = NULL, updated_at = ?
+     WHERE id = ?`,
+  )
+    .bind(startedAt, provider.mode, startedAt, id)
+    .run();
+
+  await addTaskEvent(
+    env,
+    id,
+    "execution_started",
+    user.id,
+    `Pelaksanaan bermula oleh ${agent.name} (mod ${provider.mode}).`,
+    task.status as string,
+    "in_progress",
+    { agentId: agent.id, mode: provider.mode, model: provider.model },
+  );
+
+  try {
+    const result = await executeAgent(env, agent, { ...task, assigned_agent_id: agent.id });
+    const finishedAt = nowIso();
+    const live = result.mode === "live";
+    const outcomeStatus = live ? "completed" : "blocked";
+    const mockError = live
+      ? ""
+      : "Mod mock: DEEPSEEK_API_KEY tiada; tiada pelaksanaan AI sebenar berlaku.";
+
+    await env.DB.prepare(
+      `UPDATE tasks
+       SET status = ?, result = ?, last_error = ?, execution_mode = ?, last_execution_at = ?,
+           completed_at = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        outcomeStatus,
+        result.content.slice(0, 20_000),
+        mockError,
+        result.mode,
+        finishedAt,
+        live ? finishedAt : null,
+        finishedAt,
+        id,
+      )
+      .run();
+
+    await addTaskEvent(
+      env,
+      id,
+      live ? "execution_completed" : "execution_mock",
+      user.id,
+      result.content.slice(0, 4000),
+      "in_progress",
+      outcomeStatus,
+      {
+        agentId: agent.id,
+        mode: result.mode,
+        model: result.model,
+        latencyMs: result.latencyMs,
+        usage: result.usage ?? null,
+        requestId: result.requestId ?? null,
+      },
+    );
+    await audit(env, request, user.id, "task.execute", "task", id, {
+      agentId: agent.id,
+      mode: result.mode,
+      model: result.model,
+      outcome: live ? "completed" : "mock_only",
+    });
+
+    return json({
+      task: await getTask(env, id),
+      execution: {
+        mode: result.mode,
+        live,
+        model: result.model,
+        latencyMs: result.latencyMs,
+        usage: result.usage ?? null,
+        requestId: result.requestId ?? null,
+        agent: { id: agent.id, name: agent.name },
+      },
+    });
+  } catch (error) {
+    const providerError =
+      error instanceof ProviderError
+        ? error
+        : new ProviderError("provider_error", "Pelaksanaan AI gagal.", 502);
+    const failedAt = nowIso();
+
+    await env.DB.prepare(
+      `UPDATE tasks
+       SET status = 'blocked', result = '', last_error = ?, execution_mode = ?, last_execution_at = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(providerError.message, provider.mode, failedAt, failedAt, id)
+      .run();
+
+    await addTaskEvent(
+      env,
+      id,
+      "execution_failed",
+      user.id,
+      providerError.message,
+      "in_progress",
+      "blocked",
+      { agentId: agent.id, mode: provider.mode, code: providerError.code },
+    );
+    await audit(env, request, user.id, "task.execute", "task", id, {
+      agentId: agent.id,
+      mode: provider.mode,
+      outcome: "failed",
+      code: providerError.code,
+    });
+
+    return json(
+      {
+        error: { code: providerError.code, message: providerError.message },
+        task: await getTask(env, id),
+      },
+      providerError.status,
+    );
+  }
 }
 
 async function handleTasks(
@@ -576,6 +878,12 @@ async function handleTasks(
       const dueAt = dueAtRaw ? isoDate(dueAtRaw, "dueAt") : null;
       const assignedAgentId = str(body, "assignedAgentId", 64) || null;
       const assignedUserId = str(body, "assignedUserId", 64) || null;
+      const capability = str(body, "capability", 80);
+      const requiresApproval = boolInt(body, "requiresApproval");
+
+      const metadata: Record<string, unknown> = {};
+      if (capability) metadata.capability = capability;
+      if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
 
       if (assignedAgentId) {
         const agent = await env.DB.prepare("SELECT id FROM agent_registry WHERE id = ?")
@@ -593,10 +901,21 @@ async function handleTasks(
       const id = newId();
       const status = assignedAgentId || assignedUserId ? "assigned" : "pending";
       await env.DB.prepare(
-        `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, assigned_user_id, created_by, due_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, assigned_user_id, created_by, due_at, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-        .bind(id, title, description, status, priority, assignedAgentId, assignedUserId, user.id, dueAt)
+        .bind(
+          id,
+          title,
+          description,
+          status,
+          priority,
+          assignedAgentId,
+          assignedUserId,
+          user.id,
+          dueAt,
+          JSON.stringify(metadata),
+        )
         .run();
 
       await addTaskEvent(
@@ -608,7 +927,11 @@ async function handleTasks(
         null,
         status,
       );
-      await audit(env, request, user.id, "task.create", "task", id, { priority });
+      await audit(env, request, user.id, "task.create", "task", id, {
+        priority,
+        capability: capability ?? null,
+        requiresApproval: Boolean(requiresApproval),
+      });
       return json({ task: await getTask(env, id) }, 201);
     }
 
@@ -649,6 +972,8 @@ async function handleTasks(
     const dueAt = dueAtRaw === undefined ? undefined : dueAtRaw ? isoDate(dueAtRaw, "dueAt") : null;
     const assignedAgentId = optionalText(body, "assignedAgentId", 64);
     const assignedUserId = optionalText(body, "assignedUserId", 64);
+    const capability = str(body, "capability", 80);
+    const requiresApproval = boolInt(body, "requiresApproval");
 
     const updates: string[] = [];
     const params: unknown[] = [];
@@ -663,6 +988,16 @@ async function handleTasks(
     if (dueAt !== undefined) push("due_at", dueAt);
     if (assignedAgentId !== undefined) push("assigned_agent_id", assignedAgentId || null);
     if (assignedUserId !== undefined) push("assigned_user_id", assignedUserId || null);
+
+    if (capability !== undefined || requiresApproval !== undefined) {
+      const metadata = parseJsonObject(task.metadata);
+      if (capability !== undefined) {
+        if (capability) metadata.capability = capability;
+        else delete metadata.capability;
+      }
+      if (requiresApproval !== undefined) metadata.requiresApproval = Boolean(requiresApproval);
+      push("metadata", JSON.stringify(metadata));
+    }
 
     if (assignedAgentId) {
       const agent = await env.DB.prepare("SELECT id FROM agent_registry WHERE id = ?")
@@ -749,6 +1084,10 @@ async function handleTasks(
     return json({ events: events.results }, 201);
   }
 
+  if (action === "execute" && method === "POST") {
+    return executeTask(request, env, user, task, id);
+  }
+
   throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
 }
 
@@ -769,13 +1108,17 @@ async function handleAgents(
       const params: unknown[] = [];
       const status = oneOf(url.searchParams.get("status") ?? undefined, ["active", "paused", "retired"], "status");
       if (status) {
-        where.push("status = ?");
+        where.push("a.status = ?");
         params.push(status);
       }
       const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
       const result = await env.DB.prepare(
-        `SELECT id, name, kind, description, status, capabilities, config, created_by, created_at, updated_at
-         FROM agent_registry ${clause} ORDER BY created_at DESC LIMIT 100`,
+        `SELECT a.id, a.name, a.kind, a.description, a.status, a.capabilities, a.config,
+                a.created_by, a.created_at, a.updated_at,
+                COALESCE((SELECT COUNT(*) FROM tasks t
+                          WHERE t.assigned_agent_id = a.id
+                            AND t.status IN ('assigned', 'in_progress', 'blocked')), 0) AS active_tasks
+         FROM agent_registry a ${clause} ORDER BY a.created_at DESC LIMIT 100`,
       )
         .bind(...params)
         .all<Record<string, unknown>>();
@@ -1375,6 +1718,20 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleDashboard(env);
   }
 
+  if (path === "/api/ai/status" && request.method === "GET") {
+    requirePermission(user, "tasks.read");
+    const ai = getProviderStatus(env);
+    return json({
+      provider: {
+        mode: ai.mode,
+        configured: ai.configured,
+        model: ai.model,
+        reason: ai.reason ?? null,
+        liveExecutionEnabled: ai.mode === "live",
+      },
+    });
+  }
+
   if (segments[1] === "tasks") return handleTasks(request, env, user, segments, url);
   if (segments[1] === "agents") return handleAgents(request, env, user, segments, url);
   if (segments[1] === "leads") return handleLeads(request, env, user, segments, url);
@@ -1406,6 +1763,7 @@ async function handleHealth(env: Env): Promise<Response> {
       checks: {
         database: dbOk ? "ok" : "error",
         auth: env.SESSION_SECRET ? "configured" : "missing",
+        ai: getProviderStatus(env).mode,
       },
     },
     dbOk ? 200 : 503,

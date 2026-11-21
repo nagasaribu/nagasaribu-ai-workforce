@@ -21,7 +21,9 @@ export interface D1Database {
   exec(query: string): Promise<unknown>;
 }
 
-export interface Env {
+import type { AiBindings } from "./providers/deepseek.ts";
+
+export interface Env extends AiBindings {
   DB: D1Database;
   APP_ENV: string;
   SESSION_SECRET?: string;
