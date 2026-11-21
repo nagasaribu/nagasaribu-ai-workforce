@@ -664,6 +664,33 @@ async function handleDashboard(env: Env): Promise<Response> {
     }
   }
 
+  const providerTestRows = await env.DB.prepare(
+    `SELECT metadata FROM audit_logs WHERE action = 'ai.provider_test' ORDER BY created_at DESC LIMIT 50`,
+  ).all<{ metadata: string }>();
+
+  let reasoningTokens = 0;
+  for (const row of providerTestRows.results) {
+    let metadata: Record<string, unknown> = {};
+    try {
+      metadata = JSON.parse(row.metadata || "{}") as Record<string, unknown>;
+    } catch {
+      metadata = {};
+    }
+    if (metadata.outcome === "failed" || metadata.outcome === "unexpected_output") {
+      providerErrors += 1;
+    }
+    const usage = metadata.usage && typeof metadata.usage === "object"
+      ? (metadata.usage as Record<string, unknown>)
+      : {};
+    const prompt = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+    const completion = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+    const total = typeof usage.total_tokens === "number" ? usage.total_tokens : prompt + completion;
+    if (metadata.provider === "meta") metaTokens += total;
+    if (typeof usage.reasoning_tokens === "number") reasoningTokens += usage.reasoning_tokens;
+  }
+
+  const backupVerified = (await getSetting(env, "meta_live_verified")) === "true";
+  const backupVerifiedAt = backupVerified ? await getSetting(env, "meta_live_verified_at") : null;
   const ai = getProviderStatus(env);
   const router = getRouterStatus(env);
 
@@ -713,6 +740,9 @@ async function handleDashboard(env: Env): Promise<Response> {
         role: "backup",
         configured: router.backup.configured,
         available: router.backup.available,
+        verified: backupVerified,
+        status: backupVerified ? "live" : router.backup.available ? "configured" : "missing",
+        verifiedAt: backupVerifiedAt,
         model: router.backup.model,
         reason: router.backup.reason ?? null,
       },
@@ -723,6 +753,7 @@ async function handleDashboard(env: Env): Promise<Response> {
       deepseekTokens,
       metaTokens,
       totalTokens: deepseekTokens + metaTokens,
+      reasoningTokens,
       fallbackEvents,
       providerErrors,
     },
@@ -2933,6 +2964,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     requirePermission(user, "tasks.read");
     const ai = getProviderStatus(env);
     const router = getRouterStatus(env);
+    const verified = (await getSetting(env, "meta_live_verified")) === "true";
     return json({
       provider: {
         mode: ai.mode,
@@ -2954,6 +2986,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         name: "Muse Spark",
         configured: router.backup.configured,
         available: router.backup.available,
+        verified,
+        status: verified ? "live" : router.backup.available ? "configured" : "missing",
         model: router.backup.model,
         reason: router.backup.reason ?? null,
       },
@@ -2971,26 +3005,72 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (provider !== "meta") {
       throw new HttpError(400, "Penyedia ujian tidak sah.", "invalid_provider");
     }
-    const maxTokens = optionalInt(body, "maxTokens", 32, 200) ?? 100;
+    const maxTokens = optionalInt(body, "maxTokens", 32, 2048) ?? 100;
+    const reasoningEffort =
+      oneOf(str(body, "reasoningEffort"), ["minimal", "low", "medium", "high"], "reasoningEffort") ??
+      "high";
+    const prompt =
+      str(body, "prompt", 1000) ??
+      "Sahkan bahawa saluran Muse Spark berfungsi. Berikan satu ayat status dalam Bahasa Melayu.";
+    const expectedText = str(body, "expectedText", 300) ?? "";
     try {
       const result = await runMeta(env, {
-        systemPrompt: "Anda ialah pembantu ujian sistem. Jawab dengan satu ayat ringkas dalam Bahasa Melayu.",
-        prompt: "Sahkan bahawa saluran Muse Spark berfungsi. Sebut nama model dan berikan satu ayat status.",
+        systemPrompt: "Anda ialah pembantu ujian sistem. Jawab dengan tepat seperti yang diminta.",
+        prompt,
         maxTokens,
+        reasoningEffort,
       });
+      const expectedMatched = expectedText ? result.content.includes(expectedText) : true;
+      const completed = result.responseStatus !== "incomplete" && expectedMatched;
+      if (!completed) {
+        await audit(env, request, user.id, "ai.provider_test", "provider", "meta", {
+          provider: "meta",
+          model: result.model,
+          usage: result.usage ?? null,
+          responseStatus: result.responseStatus ?? null,
+          expectedMatched,
+          reasoningEffort,
+          outcome: "unexpected_output",
+        });
+        return json(
+          {
+            error: {
+              code: "verification_mismatch",
+              message: "Respons Muse Spark tidak lengkap atau tidak sepadan dengan teks yang dijangka.",
+            },
+            provider: "meta",
+            model: result.model,
+            content: result.content,
+            responseStatus: result.responseStatus ?? null,
+            expectedMatched,
+            usage: result.usage ?? null,
+          },
+          502,
+        );
+      }
+
+      const verifiedAt = nowIso();
+      await setSetting(env, "meta_live_verified", "true");
+      await setSetting(env, "meta_live_model", result.model);
+      await setSetting(env, "meta_live_verified_at", verifiedAt);
       await audit(env, request, user.id, "ai.provider_test", "provider", "meta", {
         provider: "meta",
         model: result.model,
         usage: result.usage ?? null,
+        responseStatus: result.responseStatus ?? "completed",
+        reasoningEffort,
         outcome: "completed",
       });
       return json({
         provider: "meta",
         model: result.model,
         content: result.content,
+        responseStatus: result.responseStatus ?? null,
+        expectedMatched,
         usage: result.usage ?? null,
         requestId: result.requestId ?? null,
         latencyMs: result.latencyMs,
+        verifiedAt,
       });
     } catch (error) {
       const providerError =
@@ -3031,6 +3111,14 @@ async function handleHealth(env: Env): Promise<Response> {
     dbOk = false;
   }
 
+  let backupVerified = false;
+  try {
+    backupVerified = (await getSetting(env, "meta_live_verified")) === "true";
+  } catch {
+    backupVerified = false;
+  }
+  const backup = getMetaStatus(env);
+
   return json(
     {
       ok: dbOk,
@@ -3042,7 +3130,7 @@ async function handleHealth(env: Env): Promise<Response> {
         database: dbOk ? "ok" : "error",
         auth: env.SESSION_SECRET ? "configured" : "missing",
         ai: getProviderStatus(env).mode,
-        backup: getMetaStatus(env).available ? "configured" : "missing",
+        backup: backup.available ? (backupVerified ? "live" : "configured") : "missing",
         search: getSearchStatus(env).available ? "configured" : "unavailable",
       },
     },

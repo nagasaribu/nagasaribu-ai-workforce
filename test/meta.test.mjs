@@ -13,6 +13,7 @@ function metaResponse(content = "Muse Spark berfungsi.") {
   return {
     id: "resp-meta-1",
     object: "response",
+    status: "completed",
     output: [
       {
         type: "reasoning",
@@ -27,7 +28,12 @@ function metaResponse(content = "Muse Spark berfungsi.") {
         content: [{ type: "output_text", text: content }],
       },
     ],
-    usage: { input_tokens: 20, output_tokens: 10, total_tokens: 30 },
+    usage: {
+      input_tokens: 20,
+      output_tokens: 10,
+      total_tokens: 30,
+      output_tokens_details: { reasoning_tokens: 4 },
+    },
   };
 }
 
@@ -74,6 +80,7 @@ test("Meta Responses request uses reasoning, encrypted content and store=false",
   assert.equal(body.reasoning.summary, "auto");
   assert.deepEqual(body.include, ["reasoning.encrypted_content"]);
   assert.equal(body.store, false);
+  assert.equal(body.stream, false);
   assert.equal(body.max_output_tokens, 100);
   assert.equal(body.input[0].role, "system");
   assert.equal(body.input[1].role, "user");
@@ -83,8 +90,32 @@ test("Meta Responses request uses reasoning, encrypted content and store=false",
   assert.equal(result.provider, "meta");
   assert.equal(result.model, "muse-spark-1.3");
   assert.equal(result.requestId, "resp-meta-1");
-  assert.deepEqual(result.usage, { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 });
+  assert.equal(result.responseStatus, "completed");
+  assert.deepEqual(result.usage, {
+    prompt_tokens: 20,
+    completion_tokens: 10,
+    total_tokens: 30,
+    reasoning_tokens: 4,
+  });
   assert.doesNotMatch(JSON.stringify(result), /ENCRYPTED_REASONING_MUST_NOT_LEAK/);
+});
+
+test("Meta connectivity test can request minimal reasoning and 1024 output tokens", async () => {
+  let captured;
+  await runMeta(
+    { META_MODEL_API_KEY: "meta-secret", META_BASE_URL: "https://api.meta.test/v1" },
+    { ...INPUT, reasoningEffort: "minimal", maxTokens: 1024 },
+    async (url, init) => {
+      captured = init;
+      return new Response(JSON.stringify(metaResponse("Muse Spark backup verification berjaya.")), {
+        status: 200,
+      });
+    },
+  );
+  const body = JSON.parse(captured.body);
+  assert.equal(body.reasoning.effort, "minimal");
+  assert.equal(body.max_output_tokens, 1024);
+  assert.equal(body.store, false);
 });
 
 test("Meta output falls back to output_text when output items are unavailable", async () => {

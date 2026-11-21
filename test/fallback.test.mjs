@@ -45,6 +45,29 @@ before(async () => {
       ],
       usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
     });
+  mock
+    .get("https://api.meta.test")
+    .intercept({ path: "/v1/responses", method: "POST" })
+    .reply(200, {
+      id: "resp-verify-1",
+      status: "completed",
+      output: [
+        {
+          type: "reasoning",
+          encrypted_content: "ENCRYPTED_REASONING_MUST_NOT_LEAK",
+        },
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "Muse Spark backup verification berjaya." }],
+        },
+      ],
+      usage: {
+        input_tokens: 20,
+        output_tokens: 10,
+        total_tokens: 30,
+        output_tokens_details: { reasoning_tokens: 5 },
+      },
+    });
 
   mf = new Miniflare({
     modules: true,
@@ -161,15 +184,45 @@ test("DeepSeek transient failure falls back to Muse Spark and records provider t
   assert.equal(completed.metadata.provider, "meta");
   assert.equal(completed.metadata.fallback, true);
 
+  const verification = await call("/api/ai/providers/test", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      provider: "meta",
+      maxTokens: 1024,
+      reasoningEffort: "minimal",
+      prompt: "Reply in Bahasa Melayu with exactly:\nMuse Spark backup verification berjaya.",
+      expectedText: "Muse Spark backup verification berjaya.",
+    },
+  });
+  assert.equal(verification.status, 200);
+  assert.equal(verification.data.content, "Muse Spark backup verification berjaya.");
+  assert.equal(verification.data.responseStatus, "completed");
+  assert.equal(verification.data.expectedMatched, true);
+  assert.equal(verification.data.usage.total_tokens, 30);
+  assert.equal(verification.data.usage.reasoning_tokens, 5);
+  assert.doesNotMatch(JSON.stringify(verification.data), /ENCRYPTED_REASONING_MUST_NOT_LEAK/);
+
+  const health = await call("/health");
+  assert.equal(health.data.checks.backup, "live");
+
+  const aiStatus = await call("/api/ai/status", { token: adminToken });
+  assert.equal(aiStatus.data.backup.verified, true);
+  assert.equal(aiStatus.data.backup.status, "live");
+  assert.equal(aiStatus.data.active, "deepseek");
+
   const dashboard = await call("/api/dashboard", { token: adminToken });
   assert.equal(dashboard.status, 200);
   assert.equal(dashboard.data.providers.primary.provider, "deepseek");
   assert.equal(dashboard.data.providers.primary.mode, "live");
   assert.equal(dashboard.data.providers.backup.provider, "meta");
   assert.equal(dashboard.data.providers.backup.available, true);
+  assert.equal(dashboard.data.providers.backup.verified, true);
+  assert.equal(dashboard.data.providers.backup.status, "live");
   assert.equal(dashboard.data.providers.active, "deepseek");
   assert.equal(dashboard.data.providers.fallbackEnabled, true);
-  assert.equal(dashboard.data.usage.metaTokens, 28);
+  assert.equal(dashboard.data.usage.metaTokens, 58);
+  assert.equal(dashboard.data.usage.reasoningTokens, 5);
   assert.equal(dashboard.data.usage.fallbackEvents, 1);
   assert.equal(dashboard.data.execution.fallbacks, 1);
 
@@ -177,4 +230,5 @@ test("DeepSeek transient failure falls back to Muse Spark and records provider t
   const actions = logs.data.logs.map((entry) => entry.action);
   assert.ok(actions.includes("task.provider_fallback"));
   assert.ok(actions.includes("task.execute"));
+  assert.ok(actions.includes("ai.provider_test"));
 });

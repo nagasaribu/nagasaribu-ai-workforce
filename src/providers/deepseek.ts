@@ -20,12 +20,14 @@ export interface ProviderInput {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
 }
 
 export interface ProviderUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  reasoning_tokens?: number;
 }
 
 export type ProviderName = "deepseek" | "meta";
@@ -38,6 +40,7 @@ export interface ProviderResult {
   usage?: ProviderUsage;
   requestId?: string;
   provider?: ProviderName;
+  responseStatus?: string;
 }
 
 export class ProviderError extends Error {

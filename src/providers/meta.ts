@@ -70,6 +70,11 @@ function readUsage(value: unknown): ProviderUsage | undefined {
   else if (typeof prompt === "number" && typeof completion === "number") {
     result.total_tokens = prompt + completion;
   }
+  const details = usage.output_tokens_details;
+  if (details && typeof details === "object") {
+    const reasoning = (details as Record<string, unknown>).reasoning_tokens;
+    if (typeof reasoning === "number") result.reasoning_tokens = reasoning;
+  }
   return Object.keys(result).length ? result : undefined;
 }
 
@@ -144,7 +149,7 @@ export async function runMeta(
             content: [{ type: "input_text", text: input.prompt }],
           },
         ],
-        reasoning: { effort: "high", summary: "auto" },
+        reasoning: { effort: input.reasoningEffort ?? "high", summary: "auto" },
         include: ["reasoning.encrypted_content"],
         store: false,
         stream: false,
@@ -245,6 +250,7 @@ export async function runMeta(
       usage: readUsage(data.usage),
       requestId: typeof data.id === "string" ? data.id : undefined,
       provider: "meta",
+      responseStatus: typeof data.status === "string" ? data.status : undefined,
     };
   } catch (error) {
     if (error instanceof ProviderError) throw error;
