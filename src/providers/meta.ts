@@ -80,11 +80,18 @@ function extractVisibleText(value: unknown): string {
     for (const rawItem of data.output) {
       if (!rawItem || typeof rawItem !== "object") continue;
       const item = rawItem as Record<string, unknown>;
-      if (item.type !== "message" || !Array.isArray(item.content)) continue;
+      if (item.type === "message" && typeof item.content === "string") {
+        content += item.content;
+        continue;
+      }
+      if (!Array.isArray(item.content)) continue;
       for (const rawPart of item.content) {
         if (!rawPart || typeof rawPart !== "object") continue;
         const part = rawPart as Record<string, unknown>;
-        if (part.type === "output_text" && typeof part.text === "string") {
+        if (
+          (part.type === "output_text" || part.type === "text") &&
+          typeof part.text === "string"
+        ) {
           content += part.text;
         }
       }
@@ -140,6 +147,7 @@ export async function runMeta(
         reasoning: { effort: "high", summary: "auto" },
         include: ["reasoning.encrypted_content"],
         store: false,
+        stream: false,
         max_output_tokens: Math.min(
           Math.max(input.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 64),
           4096,
@@ -190,11 +198,38 @@ export async function runMeta(
     }
 
     const data = (await response.json()) as Record<string, unknown>;
+    if (data.error && typeof data.error === "object") {
+      const errorRecord = data.error as Record<string, unknown>;
+      const code = typeof errorRecord.code === "string" ? errorRecord.code : "unknown";
+      throw new ProviderError(
+        "provider_response_error",
+        `Muse Spark memulangkan ralat API (${code}).`,
+        502,
+        false,
+        undefined,
+        "meta",
+      );
+    }
     const content = extractVisibleText(data);
     if (!content) {
+      const outputTypes = Array.isArray(data.output)
+        ? data.output
+            .map((item) =>
+              item && typeof item === "object" && typeof (item as Record<string, unknown>).type === "string"
+                ? String((item as Record<string, unknown>).type)
+                : "unknown",
+            )
+            .slice(0, 6)
+            .join("|")
+        : "tiada";
+      const status = typeof data.status === "string" ? data.status : "unknown";
+      const incomplete =
+        data.incomplete_details && typeof data.incomplete_details === "object"
+          ? String((data.incomplete_details as Record<string, unknown>).reason ?? "")
+          : "";
       throw new ProviderError(
         "provider_invalid_response",
-        "Muse Spark memulangkan respons teks kosong.",
+        `Muse Spark tidak memulangkan teks yang boleh dibaca (status=${status}; output=${outputTypes || "tiada"}${incomplete ? "; sebab=" + incomplete : ""}).`,
         502,
         false,
         undefined,
