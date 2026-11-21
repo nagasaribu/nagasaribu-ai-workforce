@@ -855,39 +855,61 @@ async function formatReport(env: Env): Promise<string> {
   return lines.join("\n");
 }
 
-function isExternalAction(text: string): boolean {
-  const normalized = text.toLowerCase();
-  const markers = [
-    "hantar",
-    "menghantar",
-    "email",
-    "e-mel",
-    "whatsapp",
-    "hubungi",
-    "telefon",
-    "panggil",
-    "terbit",
-    "publish",
-    "kempen",
-    "campaign",
-    "bayar",
-    "payment",
-    "beli",
-    "purchase",
-    "langgan",
-    "subscribe",
-    "tempah",
-    "booking",
-    "sms",
-    "invois",
-    "invoice",
-    "sebut harga",
-    "quotation",
-    "tawaran",
-    "kontrak",
-    "sign",
-  ];
-  return markers.some((marker) => normalized.includes(marker));
+const NEGATION_RE =
+  /\b(jangan|janganlah|jgn|jng|usah|usahlah|tidak|tak|tanpa|elak|elakkan)\b/i;
+
+const NEGATABLE_ACTION_RE =
+  /\b(hantar|menghantar|dihantar|kirim|mengirim|hubungi|menghubungi|telefon|menelefon|panggil|memanggil|sms|whatsapp|whatsappkan|email|emailkan|e[\s-]?mel|terbit|terbitkan|menerbitkan|publish|posting|siar|siarkan|laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|bayar|membayar|pembayaran|beli|membeli|pembelian|langgan|melanggan|berlanggan|langganan|tempah|menempah|book|booking|tandatangan|menandatangani|sign)\b/i;
+
+const SEND_ACTION_RE =
+  /\b(hantar|menghantar|dihantar|kirim|mengirim|emailkan|whatsappkan)\b[^.!?;\n]{0,140}\b(kepada|whatsapp|email|e[\s-]?mel|sms|mesej|message|surat|invois|invoice|sebut harga|quotation|tawaran|kontrak|iklan|kempen|pelanggan|prospek|client|customer|lead|pembekal|vendor)\b/i;
+
+const CONTACT_ACTION_RE =
+  /\b(hubungi|menghubungi|telefon|menelefon|panggil|memanggil|sms|contact|call)\b[^.!?;\n]{0,100}\b(pelanggan|prospek|client|customer|lead|orang|nombor|kepada|pembekal|vendor)\b/i;
+
+const PUBLISH_ACTION_RE =
+  /\b(terbit|terbitkan|menerbitkan|diterbitkan|publish|publishing|posting|siar|siarkan|menyiarkan)\b/i;
+
+const CAMPAIGN_ACTION_RE =
+  /\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch)\b[^.!?;\n]{0,100}\b(kempen|campaign)\b/i;
+
+const CAMPAIGN_REVERSE_RE =
+  /\b(kempen|campaign)\b[^.!?;\n]{0,100}\b(laksana|laksanakan|melaksanakan|jalankan|menjalankan|mulakan|memulakan|aktifkan|mengaktifkan|launch)\b/i;
+
+const PAYMENT_ACTION_RE =
+  /\b(bayar|membayar|pembayaran|payment|beli|membeli|pembelian|purchase|langgan|melanggan|berlanggan|langganan|subscription|subscribe|tempah|menempah|booking)\b/i;
+
+const COMMITMENT_ACTION_RE =
+  /\b(tandatangan|menandatangani|ditandatangani|sign|signing)\b[^.!?;\n]{0,80}\b(kontrak|contract|perjanjian|agreement|tawaran|offer)\b/i;
+
+function stripNegatedActionClauses(text: string): string {
+  return text
+    .split(/[.!?;,\n]+|\b(?:tetapi|tapi|namun|sebaliknya|kemudian)\b/i)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause && !(NEGATION_RE.test(clause) && NEGATABLE_ACTION_RE.test(clause)))
+    .join(" ");
+}
+
+export function isExternalAction(text: string): boolean {
+  const normalized = String(text ?? "")
+    .toLowerCase()
+    .replace(/[’‘`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return false;
+
+  const actionable = stripNegatedActionClauses(normalized);
+  if (!actionable) return false;
+
+  return (
+    SEND_ACTION_RE.test(actionable) ||
+    CONTACT_ACTION_RE.test(actionable) ||
+    PUBLISH_ACTION_RE.test(actionable) ||
+    CAMPAIGN_ACTION_RE.test(actionable) ||
+    CAMPAIGN_REVERSE_RE.test(actionable) ||
+    PAYMENT_ACTION_RE.test(actionable) ||
+    COMMITMENT_ACTION_RE.test(actionable)
+  );
 }
 
 function parseCommand(text: string): { command: string; args: string } | null {

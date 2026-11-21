@@ -64,6 +64,21 @@ pending task and require explicit `/confirm TASK_ID`. Confirmation writes an app
 approval record and task event before the existing execution gate can continue. The
 existing tool configuration and approval checks still apply.
 
+Detection is clause-aware and uses word boundaries rather than raw substring matching:
+
+- Customer/marketing analysis language such as `pelanggan`, `sasaran pelanggan`,
+  `cari pelanggan`, `pelan pemasaran`, `strategi pemasaran`, `draf mesej` and
+  `cadangan kempen` is not treated as an external action.
+- Explicit action phrases such as `hantar WhatsApp kepada pelanggan`,
+  `hantar e-mel kepada prospek`, `hubungi pelanggan`, `telefon prospek`,
+  `terbitkan iklan`, `laksanakan kempen pemasaran`, `buat pembayaran` and
+  `beli atau langgan perkhidmatan` remain gated.
+- Negated clauses such as `Jangan hantar sebarang mesej` and
+  `Jangan hubungi pelanggan` are excluded, while a separate positive external
+  instruction in the same message is still gated.
+- Analysis/draft-only instructions such as `Sediakan draf sahaja` and
+  `Analisis sahaja` do not create an approval gate.
+
 ## Duplicate protection and rate limits
 
 - Every Telegram `update_id` is inserted into `telegram_updates` with

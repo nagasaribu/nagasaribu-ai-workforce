@@ -386,6 +386,29 @@ test("external actions require explicit confirmation before execution", async ()
   assert.ok(logs.results.length >= 1);
 });
 
+test("analysis-only Telegram tasks execute without a false approval gate", async () => {
+  const text =
+    "Analisis pelanggan waterproofing dan sediakan pelan pemasaran 7 hari. Jangan hantar sebarang mesej.";
+  const response = await sendUpdate(messageUpdate(2007, text));
+  assert.equal(response.status, 200);
+  assert.doesNotMatch(lastSent().text, /PENGESAHAN DIPERLUKAN/);
+  assert.match(lastSent().text, /ID:/);
+
+  const task = await dbFirst(
+    "SELECT id, execution_count, execution_state, metadata FROM tasks WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1",
+    "Analisis pelanggan waterproofing%",
+  );
+  assert.ok(task);
+  assert.equal(task.execution_count, 1, "analysis-only task should execute exactly once");
+  assert.notEqual(JSON.parse(task.metadata).requiresApproval, true);
+
+  const approvals = await dbFirst(
+    "SELECT COUNT(*) AS count FROM approvals WHERE entity_id = ?",
+    task.id,
+  );
+  assert.equal(approvals.count, 0, "analysis-only task must not create an approval record");
+});
+
 test("admin Telegram status exposes connection state without secrets", async () => {
   const response = await call("/api/telegram/status", { token: adminToken });
   assert.equal(response.status, 200);
