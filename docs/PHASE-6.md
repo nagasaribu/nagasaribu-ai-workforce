@@ -142,5 +142,17 @@ Automated tests cover invalid webhook secrets, unpaired rejection, successful
 administrator pairing, one-time code enforcement, duplicate updates, `/status`,
 `/tasks`, natural-language task execution, audit records and explicit confirmation.
 
-Live Telegram connectivity is only claimed after a real Telegram message is received
-by the deployed Worker and answered successfully.
+### Deployment record — 2026-11-21
+
+- Migration `0007_telegram_command_centre.sql` applied to production D1.
+- Worker deployed to `https://nagasaribu-ai-workforce.nagasaribuconsultancy.workers.dev`.
+- Webhook registered at `.../telegram/webhook`.
+- `getWebhookInfo` returned `matchesExpected: true`, `pendingUpdateCount: 0`.
+- Invalid webhook secret returns `401 invalid_webhook_secret`.
+- The temporary bootstrap secret was removed and `/telegram/register` now returns `404`.
+- Production tables exist and are empty: 0 accounts, 0 pairing codes, 0 updates.
+
+Live Telegram connectivity is **not yet claimed**. No real Telegram message has been
+received and answered yet. The next step is for the administrator to generate a pairing
+code in the dashboard, send `/pair CODE` to `@Ai_nagasaribu_bot`, and then send
+`/status` to complete live verification.
