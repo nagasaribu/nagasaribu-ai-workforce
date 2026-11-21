@@ -57,13 +57,18 @@ npm run db:seed:agents:remote
 - `GET /api/ai/status` reports mode, model and configuration state without exposing secrets.
 - `GET /health` reports `checks.ai` as `mock` or `live`.
 
-### Live-mode blocker
-`DEEPSEEK_API_KEY` is not configured in production. Live DeepSeek execution has therefore
-**not** been tested against the real provider. The adapter's live request/response path is
-covered by unit tests with a stubbed HTTP transport. Do not claim live AI execution until a
-real provider call succeeds.
+### Live-mode verification
+`DEEPSEEK_API_KEY` is configured in production as a `secret_text` binding. `AI_MODE` is not
+set, so mock mode is not forced. The live provider path was verified on 2026-11-21 with a
+single internal SARA task capped at 100 completion tokens:
 
-To enable live mode:
+- Provider mode: `live`
+- Model: `deepseek-chat`
+- Task state: `completed`
+- Usage: 204 prompt tokens, 100 completion tokens, 304 total
+- Audit: `task.execute` with `mode: live`, `outcome: completed`, `success: true`
+
+To rotate the key:
 ```bash
 printf '%s' 'your-deepseek-api-key' | npx wrangler secret put DEEPSEEK_API_KEY
 ```
@@ -154,7 +159,16 @@ npm run deploy
 
 ## Production status
 - Six agents registered and active.
-- Zero tasks, zero leads, zero approvals created during activation.
-- Provider mode: **mock** (no `DEEPSEEK_API_KEY`).
+- Provider mode: **live** (`DEEPSEEK_API_KEY` configured as a Cloudflare secret; no `AI_MODE` override).
+- One internal verification task (`Verifikasi DeepSeek SARA`) completed in live mode with a
+  100-token cap. A temporary verification account was removed after the test.
+- Zero leads and zero approvals were created.
 - First-admin setup: closed (`409`).
 - Unauthenticated administrative endpoints: `401`.
+
+## Notes
+- `wrangler secret list` returned an empty list in this environment even though the Worker
+  settings API confirmed `DEEPSEEK_API_KEY` and `SESSION_SECRET` as `secret_text` bindings.
+  The settings API is authoritative; secret values were never read or displayed.
+- Live results are intentionally capped when a task sets `maxTokens`; a capped response may
+  end mid-sentence. Re-run with a larger per-task cap for a complete deliverable.

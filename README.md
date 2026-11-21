@@ -21,6 +21,7 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - SARA capability-based routing and task orchestration
 - Secure DeepSeek provider adapter with Cloudflare Secrets
 - Mock-only execution when `DEEPSEEK_API_KEY` is absent (no live AI claims)
+- Live DeepSeek execution verified with a 100-token internal SARA task
 - Task results, execution history, audit logging and approval gates
 - Permanent first-admin bootstrap lock and hardened RBAC
 - Real AI activity, mock mode and error visibility in the Malay dashboard
