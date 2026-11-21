@@ -71,6 +71,20 @@ test("qualification scores relevant evidence higher and lists missing informatio
   assert.ok(irrelevant.missingInfo.some((item) => item.includes("E-mel")));
 });
 
+test("generic page titles are marked unverified instead of being treated as companies", () => {
+  const prospect = scoreProspect(
+    {
+      title: "Automasi AI untuk Kontraktor & PKS Malaysia",
+      url: "https://pangjunhan.vercel.app/automasi-ai",
+      highlights: ["Perkhidmatan automasi AI untuk kontraktor di Malaysia."],
+    },
+    INPUT,
+    "2026-11-21T00:00:00.000Z",
+  );
+  assert.equal(prospect.verified, false);
+  assert.ok(prospect.missingInfo.some((item) => item.includes("Nama syarikat")));
+});
+
 test("search results are deduplicated by domain and ranked by score", () => {
   const prospects = prospectsFromSearch(
     [

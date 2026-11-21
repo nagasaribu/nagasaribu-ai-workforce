@@ -191,7 +191,20 @@ export function scoreProspect(
     missingInfo.push("Jenis pelanggan tidak dapat disahkan daripada sumber.");
   }
 
-  const verified = Boolean(companyName && result.url && (result.title.trim() || result.text?.trim()));
+  const legalSuffix =
+    /\b(sdn\.?\s*bhd|bhd|berhad|enterprise|plt|llp|ltd|limited|inc|llc|corporation|corp|holdings|group)\b/i.test(
+      result.title,
+    );
+  const domainTokens = tokenize(domainOf(result.url).split(".")[0]?.replace(/[-_]+/g, " ") ?? "");
+  const titleTokens = tokenize(result.title);
+  const domainOverlap = domainTokens.some((token) => titleTokens.includes(token));
+  const companyIdentity = legalSuffix || (domainOverlap && result.title.trim().length > 0);
+  const verified = Boolean(
+    companyName && result.url && companyIdentity && (result.title.trim() || result.text?.trim()),
+  );
+  if (!companyIdentity) {
+    missingInfo.push("Nama syarikat tidak dapat disahkan daripada sumber.");
+  }
 
   return {
     companyName,
