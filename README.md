@@ -41,10 +41,21 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Provider/model/fallback recorded per task; token usage and provider errors in the dashboard
 - Muse Spark LIVE verified with minimal reasoning at a 1,024-token output limit; DeepSeek remains primary
 
+## Phase 6 — Telegram Command Centre
+- `POST /telegram/webhook` protected by `X-Telegram-Bot-Api-Secret-Token`
+- One-time expiring pairing codes created only from the authenticated administrator dashboard
+- Telegram user ID and private chat ID bound to the administrator; no automatic trust
+- Bot API integration: `sendMessage`, `getMe`, `setWebhook`, `getWebhookInfo`
+- Commands: `/start`, `/help`, `/status`, `/tasks`, `/agents`, `/prospects`, `/report`
+- Natural-language tasks run through the existing SARA state machine and execution pipeline
+- Explicit `/confirm` gate for external actions
+- Duplicate `update_id` protection, rate limits, audit logging and dashboard connection status
+
 See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
 [`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration,
 [`docs/PHASE-4.md`](docs/PHASE-4.md) for the customer acquisition engine,
-and [`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result.
+[`docs/PHASE-5.md`](docs/PHASE-5.md) for the provider router and Muse test result,
+and [`docs/PHASE-6.md`](docs/PHASE-6.md) for the Telegram command centre.
 
 ## Architecture decision — Database strategy (locked)
 - **Cloudflare D1 is the single primary production database.**

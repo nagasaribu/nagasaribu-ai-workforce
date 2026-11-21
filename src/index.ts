@@ -35,6 +35,18 @@ import {
   type TaskState,
 } from "./state.ts";
 import { getTool, isToolName, runSafeTool, ToolError } from "./tools.ts";
+import {
+  createPairingCode,
+  getTelegramStatus,
+  getTelegramSummary,
+  handleTelegramBootstrap,
+  handleTelegramWebhook,
+  registerTelegramWebhook,
+  revokeTelegramLink,
+  TelegramError,
+  type TelegramTaskInput,
+  type TelegramTaskResult,
+} from "./telegram.ts";
 
 const SERVICE = "nagasaribu-ai-workforce";
 const PHASE = 2;
@@ -315,6 +327,7 @@ function clearRateLimit(key: string): void {
 
 const searchAttempts = new Map<string, { count: number; resetAt: number }>();
 const draftAttempts = new Map<string, { count: number; resetAt: number }>();
+const telegramPairingAttempts = new Map<string, { count: number; resetAt: number }>();
 
 function consumeRateLimit(
   store: Map<string, { count: number; resetAt: number }>,
@@ -693,6 +706,7 @@ async function handleDashboard(env: Env): Promise<Response> {
   const backupVerifiedAt = backupVerified ? await getSetting(env, "meta_live_verified_at") : null;
   const ai = getProviderStatus(env);
   const router = getRouterStatus(env);
+  const telegram = await getTelegramSummary(env);
 
   return json({
     tasks: {
@@ -756,6 +770,17 @@ async function handleDashboard(env: Env): Promise<Response> {
       reasoningTokens,
       fallbackEvents,
       providerErrors,
+    },
+    telegram: {
+      configured: telegram.configured,
+      botUsername: telegram.botUsername,
+      webhookUrl: telegram.webhookUrl,
+      webhookCheckedAt: telegram.webhookCheckedAt,
+      linkedAccounts: telegram.linkedAccounts,
+      activeLinks: telegram.activeLinks,
+      pendingPairingCodes: telegram.pendingPairingCodes,
+      lastUpdateAt: telegram.lastUpdateAt,
+      lastMessageAt: telegram.lastMessageAt,
     },
     recentTasks: recentTasks.results,
     pendingApprovals: pendingApprovals.results,
@@ -1225,6 +1250,149 @@ async function executeTask(
     );
   }
 }
+async function runTelegramTask(
+  env: Env,
+  request: Request,
+  user: AuthUser,
+  input: TelegramTaskInput,
+): Promise<TelegramTaskResult> {
+  let taskId = (input.taskId ?? "").trim();
+  let task: Record<string, unknown> | null = null;
+
+  if (!taskId) {
+    const text = (input.text ?? "").trim().slice(0, 5000);
+    if (text.length < 3) {
+      return { taskId: "", reply: "Sila hantar arahan atau tugasan yang lebih jelas." };
+    }
+
+    const title = (text.split(/\r?\n/)[0] ?? "").trim().slice(0, 200) || "Tugasan melalui Telegram";
+    const metadata = {
+      source: "telegram",
+      telegram_user_id: input.telegramUserId,
+      telegram_chat_id: input.chatId,
+      requiresApproval: input.requiresApproval,
+    };
+    const columns = stateColumns("pending");
+    taskId = newId();
+    await env.DB.prepare(
+      `INSERT INTO tasks (id, title, description, status, execution_state, priority, created_by, metadata)
+       VALUES (?, ?, ?, ?, ?, 'normal', ?, ?)`,
+    )
+      .bind(
+        taskId,
+        title,
+        text,
+        columns.status,
+        columns.execution_state,
+        user.id,
+        JSON.stringify(metadata),
+      )
+      .run();
+    await addTaskEvent(
+      env,
+      taskId,
+      "created",
+      user.id,
+      "Tugasan dicipta melalui Telegram.",
+      null,
+      "pending",
+      { source: "telegram", requiresApproval: input.requiresApproval },
+    );
+    await audit(env, request, user.id, "telegram.task.create", "task", taskId, {
+      chatId: input.chatId,
+      requiresApproval: input.requiresApproval,
+    });
+
+    if (input.requiresApproval) {
+      return {
+        taskId,
+        external: true,
+        reply: [
+          "⚠️ PENGESAHAN DIPERLUKAN",
+          "",
+          `Tugasan ${taskId} telah direkodkan tetapi tidak dijalankan.`,
+          "Arahan ini dikesan sebagai tindakan luaran.",
+          "",
+          `Hantar /confirm ${taskId} untuk memberi pengesahan eksplisit.`,
+          "Tanpa pengesahan, tiada tindakan luaran akan dijalankan.",
+        ].join("\n"),
+      };
+    }
+
+    task = await getTask(env, taskId);
+    if (!task) {
+      return { taskId, reply: `Tugasan ${taskId} tidak dijumpai.` };
+    }
+  } else {
+    task = await getTask(env, taskId);
+    if (!task) {
+      return { taskId, reply: `Tugasan ${taskId} tidak dijumpai.` };
+    }
+  }
+
+  const response = await executeTask(request, env, user, task, taskId);
+  const data = (await response.json()) as Record<string, unknown>;
+  const updatedTask =
+    data.task && typeof data.task === "object"
+      ? (data.task as Record<string, unknown>)
+      : await getTask(env, taskId);
+  const execution =
+    data.execution && typeof data.execution === "object"
+      ? (data.execution as Record<string, unknown>)
+      : null;
+  const error =
+    data.error && typeof data.error === "object"
+      ? (data.error as Record<string, unknown>)
+      : null;
+
+  await audit(env, request, user.id, "telegram.task.execute", "task", taskId, {
+    chatId: input.chatId,
+    status: response.status,
+    mode: execution?.mode ?? null,
+    provider: execution?.provider ?? null,
+    success: execution?.success ?? false,
+  });
+
+  const title = String(updatedTask?.title ?? "Tugasan").slice(0, 160);
+  const resultText = String(updatedTask?.result ?? "").trim();
+  const lastError = String(updatedTask?.last_error ?? "").trim();
+  const mode = String(execution?.mode ?? "").trim();
+  const agent = execution?.agent && typeof execution.agent === "object"
+    ? (execution.agent as Record<string, unknown>)
+    : null;
+
+  if (!response.ok) {
+    const code = String(error?.code ?? "");
+    const message = String(error?.message ?? lastError ?? "Pelaksanaan gagal.").slice(0, 1200);
+    const confirmation =
+      code === "approval_required"
+        ? `\n\nHantar /confirm ${taskId} untuk memberi pengesahan eksplisit.`
+        : "";
+    return {
+      taskId,
+      external: code === "approval_required",
+      reply: [
+        `⚠️ Tugasan ${taskId} tidak dapat dilaksanakan.`,
+        `Tajuk: ${title}`,
+        `Sebab: ${message}${confirmation}`,
+      ].join("\n"),
+    };
+  }
+
+  const lines = [
+    mode === "live" ? "✅ HASIL SARA" : "📝 DRAF (MOD MOCK)",
+    "",
+    `Tugasan: ${title}`,
+    `ID: ${taskId}`,
+  ];
+  if (agent) lines.push(`Ejen: ${String(agent.name ?? "SARA")}`);
+  if (mode) lines.push(`Mod: ${mode}`);
+  if (execution?.provider) lines.push(`Penyedia: ${String(execution.provider)}`);
+  if (mode !== "live" && lastError) lines.push("", `Nota: ${lastError}`);
+  lines.push("", resultText || "Tiada hasil teks direkodkan.");
+  return { taskId, reply: lines.join("\n") };
+}
+
 async function handleTasks(
   request: Request,
   env: Env,
@@ -2936,6 +3104,111 @@ async function handleAuditLogs(request: Request, env: Env, user: AuthUser, url: 
   return json({ logs: result.results });
 }
 
+async function handleTelegramApi(
+  request: Request,
+  env: Env,
+  user: AuthUser,
+  segments: string[],
+): Promise<Response> {
+  if (user.role !== "admin") {
+    throw new HttpError(403, "Hanya pentadbir boleh menguruskan Telegram.", "forbidden");
+  }
+
+  const action = segments[2] ?? "";
+  const method = request.method;
+
+  if (action === "status" && method === "GET") {
+    try {
+      return json(await getTelegramStatus(env, new URL(request.url).origin));
+    } catch (error) {
+      const telegramError =
+        error instanceof TelegramError
+          ? error
+          : new TelegramError("telegram_status_failed", "Status Telegram tidak dapat dimuatkan.", 502);
+      return json(
+        { error: { code: telegramError.code, message: telegramError.message } },
+        telegramError.status,
+      );
+    }
+  }
+
+  if (action === "pairing-code" && method === "POST") {
+    consumeRateLimit(
+      telegramPairingAttempts,
+      `pair-code:${user.id}`,
+      10,
+      10 * 60 * 1000,
+      "Had penjanaan kod pasangan dicapai. Sila cuba sebentar lagi.",
+    );
+    try {
+      const created = await createPairingCode(env, user);
+      await audit(env, request, user.id, "telegram.pairing_code.create", "telegram", user.id, {
+        expiresAt: created.expiresAt,
+        botUsername: created.botUsername,
+      });
+      return json(
+        {
+          code: created.code,
+          expiresAt: created.expiresAt,
+          botUsername: created.botUsername,
+          instructions: [
+            `Buka Telegram${created.botUsername ? ` dan cari @${created.botUsername}` : ""}.`,
+            `Hantar: /pair ${created.code}`,
+            "Kod ini hanya boleh digunakan sekali dan tamat dalam 10 minit.",
+          ],
+        },
+        201,
+      );
+    } catch (error) {
+      const telegramError =
+        error instanceof TelegramError
+          ? error
+          : new TelegramError("pairing_code_failed", "Kod pasangan tidak dapat dijana.", 502);
+      return json(
+        { error: { code: telegramError.code, message: telegramError.message } },
+        telegramError.status,
+      );
+    }
+  }
+
+  if (action === "webhook" && segments[3] === "register" && method === "POST") {
+    try {
+      const registered = await registerTelegramWebhook(env, new URL(request.url).origin);
+      await audit(env, request, user.id, "telegram.webhook.register", "telegram", "bot", {
+        url: registered.url,
+        source: "dashboard",
+      });
+      return json({
+        ok: true,
+        url: registered.url,
+        webhook: registered.webhook,
+      });
+    } catch (error) {
+      const telegramError =
+        error instanceof TelegramError
+          ? error
+          : new TelegramError("webhook_registration_failed", "Pendaftaran webhook gagal.", 502);
+      await audit(env, request, user.id, "telegram.webhook.register_failed", "telegram", "bot", {
+        code: telegramError.code,
+      });
+      return json(
+        { error: { code: telegramError.code, message: telegramError.message } },
+        telegramError.status,
+      );
+    }
+  }
+
+  if (action === "unlink" && method === "POST") {
+    const body = await readJson(request);
+    const targetUserId = str(body, "userId", 64) || user.id;
+    const revoked = await revokeTelegramLink(env, targetUserId);
+    await audit(env, request, user.id, "telegram.unlink", "telegram", targetUserId, { revoked });
+    return json({ ok: true, revoked });
+  }
+
+  throw new HttpError(404, "Laluan tidak dijumpai.", "not_found");
+}
+
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const path = url.pathname;
   const segments = path.split("/").filter(Boolean);
@@ -3095,6 +3368,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (segments[1] === "leads") return handleLeads(request, env, user, segments, url);
   if (segments[1] === "lead-sources") return handleLeadSources(request, env, user);
   if (segments[1] === "approvals") return handleApprovals(request, env, user, segments, url);
+  if (segments[1] === "telegram") return handleTelegramApi(request, env, user, segments);
   if (segments[1] === "users") return handleUsers(request, env, user, segments, url);
   if (segments[1] === "audit-logs" && request.method === "GET") {
     return handleAuditLogs(request, env, user, url);
@@ -3119,6 +3393,19 @@ async function handleHealth(env: Env): Promise<Response> {
   }
   const backup = getMetaStatus(env);
 
+  let telegram = "missing";
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET) {
+    telegram = "ready";
+    try {
+      const linked = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM telegram_accounts WHERE status = 'active'",
+      ).first<{ count: number }>();
+      if (Number(linked?.count ?? 0) > 0) telegram = "linked";
+    } catch {
+      telegram = "error";
+    }
+  }
+
   return json(
     {
       ok: dbOk,
@@ -3132,6 +3419,7 @@ async function handleHealth(env: Env): Promise<Response> {
         ai: getProviderStatus(env).mode,
         backup: backup.available ? (backupVerified ? "live" : "configured") : "missing",
         search: getSearchStatus(env).available ? "configured" : "unavailable",
+        telegram,
       },
     },
     dbOk ? 200 : 503,
@@ -3149,6 +3437,14 @@ export default {
       }
 
       if (url.pathname === "/health" && method === "GET") return handleHealth(env);
+
+      if (url.pathname === "/telegram/webhook") {
+        return handleTelegramWebhook(request, env, runTelegramTask);
+      }
+
+      if (url.pathname === "/telegram/register") {
+        return handleTelegramBootstrap(request, env);
+      }
 
       if (url.pathname === "/" && method === "GET") {
         if (url.searchParams.get("format") === "json") {

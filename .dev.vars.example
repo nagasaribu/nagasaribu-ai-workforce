@@ -12,3 +12,9 @@ SESSION_SECRET=replace-with-a-long-random-secret
 # Optional public-web search (required for Cari Prospek).
 # EXA_API_KEY=your-exa-api-key
 # EXA_BASE_URL=https://api.exa.ai
+
+# Optional Telegram command centre. Use Cloudflare secrets in production.
+# TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+# TELEGRAM_WEBHOOK_SECRET=a-long-random-webhook-secret
+# Optional one-time deployment helper. Remove it after webhook registration.
+# TELEGRAM_BOOTSTRAP_TOKEN=a-long-random-bootstrap-token

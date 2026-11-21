@@ -25,7 +25,14 @@ import type { AiBindings } from "./providers/deepseek.ts";
 import type { MetaBindings } from "./providers/meta.ts";
 import type { SearchBindings } from "./providers/exa.ts";
 
-export interface Env extends AiBindings, MetaBindings, SearchBindings {
+export interface TelegramBindings {
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+  TELEGRAM_API_BASE?: string;
+  TELEGRAM_BOOTSTRAP_TOKEN?: string;
+}
+
+export interface Env extends AiBindings, MetaBindings, SearchBindings, TelegramBindings {
   DB: D1Database;
   APP_ENV: string;
   SESSION_SECRET?: string;

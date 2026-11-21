@@ -870,6 +870,7 @@ export const consoleHtml = String.raw`<!doctype html>
     filter: svg('<path d="M4 5h16l-6 7v5l-4 2v-7L4 5z"/>'),
     refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7M21 3v6h-6"/>'),
     inbox: svg('<path d="M4 4h16v16H4z"/><path d="M4 12h5l2 3h6l2-3h5"/>'),
+    telegram: svg('<path d="m22 3-9.5 18-2.5-7-7-2.5L22 3z"/><path d="m10 14 4-4"/>'),
     user: svg('<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>')
   };
 
@@ -1069,6 +1070,7 @@ export const consoleHtml = String.raw`<!doctype html>
         statusPill(checks.ai === "live" ? "DeepSeek LIVE" : "DeepSeek MOCK", checks.ai === "live" ? "green" : "amber", null),
         statusPill(checks.search === "configured" ? "Exa READY" : "Exa OFFLINE", checks.search === "configured" ? "teal" : "amber", null),
         statusPill(checks.backup === "live" ? "Muse Spark LIVE" : checks.backup === "configured" ? "Muse Spark CONFIGURED" : "Muse Spark OFFLINE", checks.backup === "live" ? "green" : checks.backup === "configured" ? "violet" : "amber", null),
+        statusPill(checks.telegram === "linked" ? "Telegram LINKED" : checks.telegram === "ready" ? "Telegram READY" : "Telegram OFFLINE", checks.telegram === "linked" ? "green" : checks.telegram === "ready" ? "teal" : "amber", null),
         statusPill(checks.database === "ok" ? "D1 HEALTHY" : "D1 DEGRADED", checks.database === "ok" ? "green" : "red", null)
       ].join("");
     }).catch(function () {
@@ -1158,6 +1160,12 @@ export const consoleHtml = String.raw`<!doctype html>
       var aiLive = checks.ai === "live";
       var exaReady = checks.search === "configured";
       var dbOk = checks.database === "ok";
+      var telegram = data.telegram || {};
+      var telegramConfigured = Boolean(telegram.configured);
+      var telegramLinked = Number(telegram.activeLinks || 0);
+      var telegramReady = telegramConfigured && telegramLinked > 0;
+      var telegramState = !telegramConfigured ? "BELUM DIKONFIGURASI" : telegramReady ? "TERHUBUNG" : "SIAP UNTUK PASANGAN";
+      var telegramTone = !telegramConfigured ? "slate" : telegramReady ? "green" : "amber";
       var firstName = String(state.user.name || "").split(/\s+/)[0] || "SARA";
       var today = new Intl.DateTimeFormat("ms-MY", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
       var canWriteTasks = state.user.role !== "viewer";
@@ -1168,6 +1176,7 @@ export const consoleHtml = String.raw`<!doctype html>
             statusPill(aiLive ? "DeepSeek LIVE" : "DeepSeek MOCK", aiLive ? "green" : "amber", null),
             statusPill(exaReady ? "Exa READY" : "Exa OFFLINE", exaReady ? "teal" : "amber", null),
             statusPill(checks.backup === "live" ? "Muse Spark LIVE" : checks.backup === "configured" ? "Muse Spark CONFIGURED" : "Muse Spark OFFLINE", checks.backup === "live" ? "green" : checks.backup === "configured" ? "violet" : "amber", null),
+            statusPill("Telegram " + telegramState, telegramTone, null),
             statusPill(dbOk ? "D1 HEALTHY" : "D1 DEGRADED", dbOk ? "green" : "red", null)
           ].join("")
         : statusPill("Status sistem tidak tersedia", "slate", null);
@@ -1205,6 +1214,26 @@ export const consoleHtml = String.raw`<!doctype html>
         providerCard({ name: "Exa", role: "Search · Carian awam", tone: "teal", icon: "search", status: exaReady ? "READY" : "OFFLINE", statusTone: exaReady ? "teal" : "amber", model: "exa" })
       ].join("");
       var providerPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.bolt + ' Provider AI</h2><div class="status-strip">' + statusPill("Aktif: " + activeName, providers.active === "deepseek" ? "green" : providers.active === "meta" ? "violet" : "slate", null) + '</div></div><div class="panel-body"><div class="agent-grid compact">' + providerCards + '</div><div class="detail-grid" style="margin-top:16px"><div class="detail-item"><div class="label">Model Aktif</div><div class="value">' + esc(activeModel) + '</div></div><div class="detail-item"><div class="label">Jumlah Token</div><div class="value">' + esc(usage.totalTokens || 0) + '</div></div><div class="detail-item"><div class="label">Token Reasoning</div><div class="value">' + esc(usage.reasoningTokens || 0) + '</div></div><div class="detail-item"><div class="label">Fallback</div><div class="value">' + esc(usage.fallbackEvents || 0) + ' event</div></div><div class="detail-item"><div class="label">Ralat Penyedia</div><div class="value">' + esc(usage.providerErrors || 0) + '</div></div></div><div class="panel-sub" style="margin-top:12px">Fallback automatik hanya untuk timeout, ralat rangkaian, HTTP 429 dan HTTP 5xx. Ralat pengesahan tidak dicuba semula.</div></div></div>';
+
+      var telegramActions = state.user.role === "admin"
+        ? '<div class="card-actions">' +
+            '<button class="btn btn-sm btn-primary" type="button" data-action="telegram-pair">' + ICONS.telegram + ' Jana Kod Pasangan</button>' +
+            '<button class="btn btn-sm" type="button" data-action="telegram-register">' + ICONS.refresh + ' Daftar Webhook</button>' +
+            (telegramLinked > 0 ? '<button class="btn btn-sm" type="button" data-action="telegram-unlink">' + ICONS.external + ' Putuskan Pautan</button>' : "") +
+          "</div>"
+        : "";
+      var telegramPanel = '<div class="panel"><div class="panel-head"><h2>' + ICONS.telegram + ' Telegram Command Centre</h2><div class="status-strip">' + statusPill(telegramState, telegramTone, null) + '</div></div><div class="panel-body">' +
+        '<div class="detail-grid">' +
+          '<div class="detail-item"><div class="label">Bot</div><div class="value">' + esc(telegram.botUsername ? "@" + telegram.botUsername : "Belum disahkan") + '</div></div>' +
+          '<div class="detail-item"><div class="label">Pautan Aktif</div><div class="value">' + esc(telegramLinked) + ' akaun</div></div>' +
+          '<div class="detail-item"><div class="label">Webhook</div><div class="value">' + esc(telegram.webhookUrl ? "Terdaftar" : "Belum didaftarkan") + '</div></div>' +
+          '<div class="detail-item"><div class="label">Kod Menunggu</div><div class="value">' + esc(telegram.pendingPairingCodes || 0) + '</div></div>' +
+          '<div class="detail-item"><div class="label">Mesej Terakhir</div><div class="value">' + esc(telegram.lastMessageAt ? fmtDate(telegram.lastMessageAt) : "—") + '</div></div>' +
+          '<div class="detail-item"><div class="label">Update Terakhir</div><div class="value">' + esc(telegram.lastUpdateAt ? fmtDate(telegram.lastUpdateAt) : "—") + '</div></div>' +
+        "</div>" + telegramActions +
+        '<div id="telegram-pairing" class="panel-sub" style="margin-top:12px"></div>' +
+        '<div class="panel-sub" style="margin-top:12px">Pasangan hanya boleh dibuat melalui kod sekali guna yang dijana oleh pentadbir. Pengguna Telegram tidak diterima secara automatik, dan setiap update dideduplikasi menggunakan update_id.</div>' +
+        "</div></div>";
 
       var agentCards = agents.length
         ? agents.map(agentMiniCard).join("")
@@ -1270,6 +1299,7 @@ export const consoleHtml = String.raw`<!doctype html>
         '</div><div class="hero-status"><div class="hero-status-title">Status Sistem</div><div class="status-strip">' + heroStatus + '</div><div class="hero-note">' + esc(systemNote) + "</div></div></div></section>" +
         stats +
         providerPanel +
+        telegramPanel +
         agentsPanel +
         '<div class="grid-2">' + activityPanel + pipelinePanel + "</div>" +
         '<div class="grid-2">' + recentPanel + errorsPanel + "</div>";
@@ -2122,6 +2152,47 @@ export const consoleHtml = String.raw`<!doctype html>
           toast("Status pengguna dikemas kini.");
           switchTab("users");
         }).catch(function (error) { toast(error.message, true); });
+      return;
+    }
+
+    if (action === "telegram-pair") {
+      target.disabled = true;
+      api("/api/telegram/pairing-code", { method: "POST", body: {} })
+        .then(function (data) {
+          var box = $("telegram-pairing");
+          if (box) {
+            box.innerHTML = '<div class="result-box"><strong>Kod pasangan: ' + esc(data.code) + '</strong><br>' +
+              'Sah sehingga ' + esc(fmtDate(data.expiresAt)) + '.<br>' +
+              (data.botUsername ? 'Buka @' + esc(data.botUsername) + ' dan hantar: ' : "Hantar: ") +
+              '<code>/pair ' + esc(data.code) + '</code></div>';
+          }
+          toast("Kod pasangan dijana. Hantar /pair KOD melalui Telegram.");
+          target.disabled = false;
+        })
+        .catch(function (error) { toast(error.message, true); target.disabled = false; });
+      return;
+    }
+
+    if (action === "telegram-register") {
+      target.disabled = true;
+      api("/api/telegram/webhook/register", { method: "POST", body: {} })
+        .then(function (data) {
+          var webhook = data.webhook || {};
+          toast(webhook.matchesExpected ? "Webhook Telegram didaftarkan dan disahkan." : "Webhook didaftarkan. Semak status Telegram.");
+          switchTab("dashboard");
+        })
+        .catch(function (error) { toast(error.message, true); target.disabled = false; });
+      return;
+    }
+
+    if (action === "telegram-unlink") {
+      if (!window.confirm("Putuskan pautan Telegram untuk akaun anda? Pengguna Telegram ini akan ditolak sehingga pasangan baharu dibuat.")) return;
+      api("/api/telegram/unlink", { method: "POST", body: {} })
+        .then(function () {
+          toast("Pautan Telegram diputuskan.");
+          switchTab("dashboard");
+        }).catch(function (error) { toast(error.message, true); });
+      return;
     }
   });
 
