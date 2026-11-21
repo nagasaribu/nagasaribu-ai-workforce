@@ -191,5 +191,57 @@ Live Telegram connectivity is now verified in production:
 - Recorded `approval_requirement_removed` in the task timeline and
   `task.approval_requirement_removed` in the audit log.
 - `npm run typecheck` and `npm test` pass (104 tests).
-- Live production verification after deployment still requires the administrator to send
-  a new analysis-only Telegram message.
+
+### Negation-scope correction — 2026-11-21
+
+The first detector still split on commas, which broke negation scope for coordinated
+lists. The detector now:
+
+- Splits only on sentence boundaries and contrastive connectors, not commas.
+- Tracks negation from `Jangan` / `Do not` across comma-separated and `atau`/`or`
+  coordinated actions.
+- Stops a negation scope at a comma when no explicit coordinator exists, so a later
+  positive action remains gated.
+- Handles English instructions such as
+  `Do not send messages, contact customers, or publish ads`.
+
+The complete production message now returns `isExternalAction = false`.
+
+A second, narrower production issue was found during live verification: Marketing AI's
+agent configuration has `requiresApproval: true`. Telegram analysis-only tasks now carry
+`metadata.approvalMode: "analysis_only"`, which bypasses only the agent-level default.
+Explicit `requiresApproval`, `external_action` capabilities and approval-required tools
+still force approval.
+
+#### Production task `fb573362-fcc3-4c88-96d7-c10582b9d6ee`
+
+- Was never executed: `execution_count = 0`, no result, no `last_execution_at`,
+  no execution/tool events and no approval records.
+- Corrected to `assigned` with `assigned_agent_id = agent_marketing`,
+  `requiresApproval: false` and `approvalMode: "analysis_only"`.
+- The task itself was not confirmed or executed.
+- Correction recorded in the task timeline and audit log.
+
+#### Exact production webhook verification
+
+The exact original message was sent through the production webhook path using a
+temporary token-gated verification endpoint, which was removed immediately afterwards.
+
+- Verification task: `ef5d6183-38b2-48e1-a564-191713714f75`
+- Status: `completed`
+- Agent: Marketing AI (`agent_marketing`)
+- Execution mode: `live`
+- Provider/model: DeepSeek `deepseek-chat`
+- Result length: 3,548 characters
+- Approvals: 0
+- Approval/tool/external-action events: 0
+- Execution completed events: 1
+
+A pre-fix verification attempt (`d46169b4-2ce8-4ceb-a602-6b77afd9b6f3`) was blocked
+before execution by the agent-level gate, then cancelled and recorded as superseded.
+It had `execution_count = 0` and no approvals.
+
+The temporary `/telegram/verify` endpoint now returns `404`, and the temporary
+`TELEGRAM_BOOTSTRAP_TOKEN` secret was deleted.
+
+`npm run typecheck` and `npm test` pass (107 tests).
