@@ -62,11 +62,11 @@ The dashboard shows:
 - Provider error count
 - Task-level provider/fallback details in the task detail dialog
 
-Backup status is labelled **CONFIGURED**, not **LIVE**, until a successful real Muse response
-is observed.
+Backup status is labelled **CONFIGURED** until a successful real Muse response is persisted;
+after verification it is labelled **LIVE**.
 
 ## Testing
-`npm test` covers 84 tests, including:
+`npm test` covers 85 tests, including:
 - DeepSeek primary selection.
 - DeepSeek timeout/429/5xx fallback to Muse.
 - No fallback on DeepSeek 400/401/403/404.
@@ -76,27 +76,30 @@ is observed.
 - Meta request shape, reasoning settings, encrypted-content exclusion, usage and request ID.
 - Full Worker fallback integration with `provider_fallback` events and audit logs.
 
-## Real Muse test result
-A real authenticated Meta request was executed with `max_output_tokens: 100`, reasoning
-effort `high` and encrypted reasoning included. The API accepted the request and returned a
-valid Responses payload, but:
+## Real Muse test result — LIVE VERIFIED
+A controlled real Meta request succeeded:
 
-```text
-status = incomplete
-output = reasoning
-reason = max_output_tokens
-```
+- Model: `muse-spark-1.3`
+- Reasoning effort: `minimal`
+- `max_output_tokens`: `1024`
+- `store`: `false`
+- `include`: `reasoning.encrypted_content`
+- Response status: `completed`
+- Visible output: `Muse Spark backup verification berjaya.`
+- Request ID: `resp_6b01b2234c18094b08b14148`
+- Latency: 2,256 ms
+- Usage: 57 input tokens, 40 output tokens, 97 total, 23 reasoning tokens
 
-No visible text was produced because the high-reasoning budget consumed the 100-token cap.
-Muse Spark is therefore **not claimed as live** and is not yet verified as a usable fallback
-at this output limit.
+The verification timestamp and model were stored in `system_settings`. `/health` now reports
+`backup: "live"`, and the dashboard shows **Muse Spark LIVE** while DeepSeek remains the active
+primary. Encrypted reasoning was not returned, logged or stored.
 
-To verify Muse live, either:
-1. Increase `max_output_tokens` for the verification request (the normal task default is 1,400), or
-2. Lower reasoning effort for the test.
+Earlier attempts with `max_output_tokens: 100` and reasoning effort `high` returned
+`status=incomplete`, `output=reasoning`, `reason=max_output_tokens`. The controlled test used
+minimal reasoning and 1,024 output tokens, which resolved the issue.
 
-After a successful visible response is confirmed, update the backup status from CONFIGURED to
-LIVE and record the provider usage.
+Connectivity tests should continue to use minimal reasoning. Normal fallback tasks retain the
+provider's configured reasoning setting.
 
 ## Deployment
 - Migration: `0006_provider_router.sql`

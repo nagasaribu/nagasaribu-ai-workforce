@@ -39,7 +39,7 @@ Cloud-first operations platform for the NAGASARIBU AI Workforce.
 - Automatic fallback only for timeouts, network failures, HTTP 429 and HTTP 5xx
 - No fallback on authentication, configuration or invalid-request errors
 - Provider/model/fallback recorded per task; token usage and provider errors in the dashboard
-- Muse Spark is configured but not yet verified live at the 100-token high-reasoning limit
+- Muse Spark LIVE verified with minimal reasoning at a 1,024-token output limit; DeepSeek remains primary
 
 See [`docs/PHASE-2.md`](docs/PHASE-2.md) for the schema and base API,
 [`docs/PHASE-3.md`](docs/PHASE-3.md) for activation and orchestration,
