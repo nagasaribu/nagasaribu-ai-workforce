@@ -104,8 +104,8 @@ The test suite covers:
 - Migrations `0008` and `0009` applied to production D1.
 - Existing data preserved: 1 user, 1 Telegram account, 7 tasks before migration;
   preferences backfilled to `human`.
-- Worker deployed from commit `7a7f351`; active version after bootstrap-secret
-  removal: `9ca613f8-db23-4add-bdc5-6f8d7c354e98`.
+- Worker deployed from commit `7a7f351`; final active version after bootstrap-secret
+  removal: `fa71e396-b741-4ae3-abb4-d5edecb20d80`.
 - Production web chat verified with a temporary administrator session:
   - authenticated `GET /api/chat` returned human mode, 6 starter actions and the
     requested welcome text;
